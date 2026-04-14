@@ -20,9 +20,9 @@
 
 ## 目录
 
-- [main.py](/Users/wenxiang/code/bigmodel-excel-bot/main.py): 主脚本
-- [config.example.json](/Users/wenxiang/code/bigmodel-excel-bot/config.example.json): 通用配置模板
-- [config.json](/Users/wenxiang/code/bigmodel-excel-bot/config.json): 当前可运行配置
+- [main.py](xxxxx/bigmodel-excel-bot/main.py): 主脚本
+- [config.example.json](xxxxx/bigmodel-excel-bot/config.example.json): 通用配置模板
+- [config.json](xxxxxxxxxx/bigmodel-excel-bot/config.json): 当前可运行配置
 
 ## Excel 约定
 
