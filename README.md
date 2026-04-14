@@ -43,7 +43,7 @@
 1. 进入目录：
 
 ```bash
-cd /Users/wenxiang/code/bigmodel-excel-bot
+cd /xxxxx/code/bigmodel-excel-bot
 ```
 
 2. 安装依赖：
