@@ -5,12 +5,13 @@ import json
 import re
 import sys
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Optional
 
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
@@ -79,6 +80,15 @@ class SourceRecord:
     url: str
     title: str
     app_name: str
+
+
+@dataclass
+class PromptRunRecord:
+    query: str
+    result: str
+    sources: str
+    source_urls: str
+    source_titles: str
 
 
 def parse_args() -> argparse.Namespace:
@@ -857,6 +867,107 @@ def send_prompt(page, config: AppConfig, prompt: str) -> ResponseData:
     return wait_for_response(page, config, previous_count, previous_text, prompt)
 
 
+@contextmanager
+def open_chat_page(config: AppConfig, interactive_login: bool = True):
+    config.browser.user_data_dir.mkdir(parents=True, exist_ok=True)
+
+    with sync_playwright() as playwright:
+        launch_kwargs = {
+            "user_data_dir": str(config.browser.user_data_dir),
+            "headless": config.browser.headless,
+        }
+        if config.browser.channel:
+            launch_kwargs["channel"] = config.browser.channel
+
+        context = playwright.chromium.launch_persistent_context(**launch_kwargs)
+        context.set_default_timeout(config.browser.action_timeout_ms)
+        page = context.pages[0] if context.pages else context.new_page()
+        page.goto(config.browser.start_url, wait_until="domcontentloaded")
+        page.wait_for_timeout(config.browser.startup_wait_ms)
+
+        if config.chat.manual_login:
+            try:
+                ensure_chat_ready(page, config)
+            except RuntimeError:
+                if not interactive_login:
+                    context.close()
+                    raise RuntimeError(
+                        f"Login required for {config.chat.platform_name}. "
+                        "Complete login in the configured browser profile first."
+                    )
+                print(
+                    f"Please log in to {config.chat.platform_name} in the opened browser window, "
+                    "then press Enter here."
+                )
+                input()
+                ensure_chat_ready(page, config)
+
+        handle_popup_if_present(page, config)
+        try:
+            yield context, page
+        finally:
+            context.close()
+
+
+def run_prompt_batch(
+    config: AppConfig,
+    prompts: list[str],
+    interactive_login: bool = True,
+) -> list[PromptRunRecord]:
+    records: list[PromptRunRecord] = []
+
+    with open_chat_page(config, interactive_login=interactive_login) as (_, page):
+        for prompt in prompts:
+            prompt_text = str(prompt).strip()
+            if not prompt_text:
+                continue
+            response = send_prompt(page, config, prompt_text)
+            records.append(
+                PromptRunRecord(
+                    query=prompt_text,
+                    result=response.text,
+                    sources=response.sources,
+                    source_urls=response.source_urls,
+                    source_titles=response.source_titles,
+                )
+            )
+
+    return records
+
+
+def export_prompt_records_to_excel(
+    records: list[PromptRunRecord],
+    output_path: Path,
+    summary: Optional[dict[str, str]] = None,
+) -> Path:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Results"
+    headers = ["query", "result", "sources", "source_urls", "source_titles"]
+    sheet.append(headers)
+
+    for record in records:
+        sheet.append(
+            [
+                record.query,
+                record.result,
+                record.sources,
+                record.source_urls,
+                record.source_titles,
+            ]
+        )
+
+    if summary:
+        summary_sheet = workbook.create_sheet("Summary")
+        summary_sheet.append(["field", "value"])
+        for key, value in summary.items():
+            summary_sheet.append([key, value])
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    workbook.save(output_path)
+    return output_path
+
+
 def main() -> int:
     args = parse_args()
     config_path = Path(args.config).expanduser().resolve()
@@ -891,34 +1002,7 @@ def main() -> int:
         print("No eligible rows found. Nothing to do.")
         return 0
 
-    config.browser.user_data_dir.mkdir(parents=True, exist_ok=True)
-
-    with sync_playwright() as playwright:
-        launch_kwargs = {
-            "user_data_dir": str(config.browser.user_data_dir),
-            "headless": config.browser.headless,
-        }
-        if config.browser.channel:
-            launch_kwargs["channel"] = config.browser.channel
-
-        context = playwright.chromium.launch_persistent_context(**launch_kwargs)
-        context.set_default_timeout(config.browser.action_timeout_ms)
-        page = context.pages[0] if context.pages else context.new_page()
-        page.goto(config.browser.start_url, wait_until="domcontentloaded")
-        page.wait_for_timeout(config.browser.startup_wait_ms)
-
-        if config.chat.manual_login:
-            try:
-                ensure_chat_ready(page, config)
-            except RuntimeError:
-                print(
-                    f"Please log in to {config.chat.platform_name} in the opened browser window, "
-                    "then press Enter here."
-                )
-                input()
-                ensure_chat_ready(page, config)
-        handle_popup_if_present(page, config)
-
+    with open_chat_page(config, interactive_login=True) as (_, page):
         for index, row_idx in enumerate(rows, start=1):
             prompt = str(sheet.cell(row=row_idx, column=prompt_col).value).strip()
             print(f"[{index}/{len(rows)}] Processing row {row_idx}")
@@ -941,8 +1025,6 @@ def main() -> int:
             if source_titles_col is not None:
                 sheet.cell(row=row_idx, column=source_titles_col).value = source_titles
             workbook.save(config.excel.path)
-
-        context.close()
 
     print(f"Finished. Results written to {config.excel.path}")
     return 0
