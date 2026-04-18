@@ -2,9 +2,11 @@
 
 import argparse
 import json
+import re
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -21,6 +23,7 @@ class ExcelConfig:
     header_row: int
     prompt_column: str
     result_column: str
+    source_column: Optional[str]
     start_row: Optional[int]
     skip_completed: bool
 
@@ -43,6 +46,9 @@ class ChatConfig:
     response_selectors: list[str]
     new_chat_selectors: list[str]
     loading_selectors: list[str]
+    popup_selectors: list[str]
+    popup_confirm_selectors: list[str]
+    popup_artifact_dir: Path
     response_timeout_seconds: int
     stability_checks: int
     poll_interval_seconds: float
@@ -50,6 +56,7 @@ class ChatConfig:
     clear_input_hotkey: str
     new_chat_each_prompt: bool
     manual_login: bool
+    manual_popup_confirmation: bool
 
 
 @dataclass
@@ -57,6 +64,21 @@ class AppConfig:
     excel: ExcelConfig
     browser: BrowserConfig
     chat: ChatConfig
+
+
+@dataclass
+class ResponseData:
+    text: str
+    sources: str
+    source_urls: str = ""
+    source_titles: str = ""
+
+
+@dataclass
+class SourceRecord:
+    url: str
+    title: str
+    app_name: str
 
 
 def parse_args() -> argparse.Namespace:
@@ -83,7 +105,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_config(config_path: Path) -> AppConfig:
-    with config_path.open("r", encoding="utf-8") as fh:
+    # Accept UTF-8 BOM because many Windows editors emit it by default.
+    with config_path.open("r", encoding="utf-8-sig") as fh:
         raw = json.load(fh)
 
     excel_raw = raw["excel"]
@@ -92,17 +115,23 @@ def load_config(config_path: Path) -> AppConfig:
     if not chat_raw:
         raise ValueError("Config must contain a 'chat' section. Legacy 'doubao' is also supported.")
 
+    start_url = browser_raw.get("start_url") or browser_raw["doubao_url"]
+    start_url_path = (config_path.parent / start_url).expanduser()
+    if "://" not in start_url and start_url_path.exists():
+        start_url = start_url_path.resolve().as_uri()
+
     excel = ExcelConfig(
         path=(config_path.parent / excel_raw["path"]).expanduser().resolve(),
         sheet=excel_raw.get("sheet"),
         header_row=int(excel_raw.get("header_row", 1)),
         prompt_column=excel_raw["prompt_column"],
         result_column=excel_raw["result_column"],
+        source_column=excel_raw.get("source_column"),
         start_row=excel_raw.get("start_row"),
         skip_completed=bool(excel_raw.get("skip_completed", True)),
     )
     browser = BrowserConfig(
-        start_url=browser_raw.get("start_url") or browser_raw["doubao_url"],
+        start_url=start_url,
         user_data_dir=(config_path.parent / browser_raw["user_data_dir"]).expanduser().resolve(),
         channel=browser_raw.get("channel"),
         headless=bool(browser_raw.get("headless", False)),
@@ -116,15 +145,25 @@ def load_config(config_path: Path) -> AppConfig:
         response_selectors=list(chat_raw["response_selectors"]),
         new_chat_selectors=list(chat_raw.get("new_chat_selectors", [])),
         loading_selectors=list(chat_raw.get("loading_selectors", [])),
+        popup_selectors=list(chat_raw.get("popup_selectors", ["[role='dialog']", "[aria-modal='true']"])),
+        popup_confirm_selectors=list(chat_raw.get("popup_confirm_selectors", [])),
+        popup_artifact_dir=(config_path.parent / chat_raw.get("popup_artifact_dir", "./artifacts/popups"))
+        .expanduser()
+        .resolve(),
         response_timeout_seconds=int(chat_raw.get("response_timeout_seconds", 120)),
         stability_checks=int(chat_raw.get("stability_checks", 3)),
         poll_interval_seconds=float(chat_raw.get("poll_interval_seconds", 1.0)),
         send_hotkey=chat_raw.get("send_hotkey", "Enter"),
-        clear_input_hotkey=chat_raw.get("clear_input_hotkey", "Meta+A"),
+        clear_input_hotkey=chat_raw.get("clear_input_hotkey", "Control+A"),
         new_chat_each_prompt=bool(chat_raw.get("new_chat_each_prompt", False)),
         manual_login=bool(chat_raw.get("manual_login", True)),
+        manual_popup_confirmation=bool(chat_raw.get("manual_popup_confirmation", True)),
     )
     return AppConfig(excel=excel, browser=browser, chat=chat)
+
+
+_POPUP_CAPTURED_STATE: dict[int, bool] = {}
+_POPUP_COUNTER_STATE: dict[int, int] = {}
 
 
 def column_index_by_header(sheet, header_row: int, header_name: str) -> int:
@@ -133,6 +172,17 @@ def column_index_by_header(sheet, header_row: int, header_name: str) -> int:
         if str(cell.value or "").strip().lower() == normalized_target:
             return cell.column
     raise ValueError(f"Header '{header_name}' not found in row {header_row}")
+
+
+def ensure_column_index_by_header(sheet, header_row: int, header_name: Optional[str]) -> Optional[int]:
+    if not header_name:
+        return None
+    try:
+        return column_index_by_header(sheet, header_row, header_name)
+    except ValueError:
+        new_column = sheet.max_column + 1
+        sheet.cell(row=header_row, column=new_column).value = header_name
+        return new_column
 
 
 def iter_candidate_rows(sheet, excel_config: ExcelConfig, overwrite: bool) -> Iterable[int]:
@@ -192,16 +242,525 @@ def click_if_present(page, selectors: list[str], action_timeout_ms: int) -> bool
         return False
 
 
-def get_last_response_text(page, selectors: list[str]) -> str:
+def save_popup_artifacts(page, config: AppConfig) -> Path:
+    page_key = id(page)
+    popup_index = _POPUP_COUNTER_STATE.get(page_key, 0) + 1
+    _POPUP_COUNTER_STATE[page_key] = popup_index
+
+    artifact_dir = (
+        config.chat.popup_artifact_dir
+        / f"{config.chat.platform_name}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{popup_index:02d}"
+    )
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+
+    popup_entries = []
+    for selector in config.chat.popup_selectors:
+        locator = page.locator(selector)
+        count = locator.count()
+        for index in range(count):
+            popup = locator.nth(index)
+            try:
+                if not popup.is_visible():
+                    continue
+                popup_entries.append(
+                    {
+                        "selector": selector,
+                        "index": index,
+                        "text": popup.inner_text(),
+                        "html": popup.evaluate("(el) => el.outerHTML"),
+                    }
+                )
+            except PlaywrightError:
+                continue
+
+    button_entries = []
+    buttons = page.locator("button")
+    for index in range(buttons.count()):
+        button = buttons.nth(index)
+        try:
+            if not button.is_visible():
+                continue
+            button_entries.append(
+                {
+                    "index": index,
+                    "text": button.inner_text().strip(),
+                    "aria_label": button.get_attribute("aria-label"),
+                    "class": button.get_attribute("class"),
+                }
+            )
+        except PlaywrightError:
+            continue
+
+    (artifact_dir / "popup-dom.json").write_text(
+        json.dumps(
+            {
+                "captured_at": datetime.now().isoformat(),
+                "page_url": page.url,
+                "page_title": page.title(),
+                "popup_selectors": config.chat.popup_selectors,
+                "popup_confirm_selectors": config.chat.popup_confirm_selectors,
+                "popups": popup_entries,
+                "visible_buttons": button_entries,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    page.screenshot(path=str(artifact_dir / "page.png"), full_page=True)
+    for index, entry in enumerate(popup_entries, start=1):
+        (artifact_dir / f"popup-{index:02d}.html").write_text(entry["html"], encoding="utf-8")
+
+    return artifact_dir
+
+
+def detect_popup(page, selectors: list[str]) -> bool:
+    for selector in selectors:
+        locator = page.locator(selector)
+        if locator.count() == 0:
+            continue
+        try:
+            if locator.first.is_visible():
+                return True
+        except PlaywrightError:
+            continue
+    return False
+
+
+def handle_popup_if_present(page, config: AppConfig) -> bool:
+    page_key = id(page)
+    if not detect_popup(page, config.chat.popup_selectors):
+        _POPUP_CAPTURED_STATE[page_key] = False
+        return False
+
+    if not _POPUP_CAPTURED_STATE.get(page_key, False):
+        artifact_dir = save_popup_artifacts(page, config)
+        _POPUP_CAPTURED_STATE[page_key] = True
+        print(f"Popup artifacts saved to {artifact_dir}")
+
+    if click_if_present(page, config.chat.popup_confirm_selectors, config.browser.action_timeout_ms):
+        page.wait_for_timeout(1000)
+        if not detect_popup(page, config.chat.popup_selectors):
+            _POPUP_CAPTURED_STATE[page_key] = False
+        return True
+
+    if config.chat.manual_popup_confirmation:
+        print(
+            f"Detected a popup in {config.chat.platform_name}. "
+            "Complete the verification in the browser. The script will continue automatically."
+        )
+        deadline = time.time() + max(60, config.chat.response_timeout_seconds)
+        while time.time() < deadline:
+            if not detect_popup(page, config.chat.popup_selectors):
+                _POPUP_CAPTURED_STATE[page_key] = False
+                page.wait_for_timeout(1000)
+                return True
+            time.sleep(config.chat.poll_interval_seconds)
+        raise TimeoutError(
+            f"Timed out waiting for popup verification in {config.chat.platform_name}."
+        )
+        return True
+
+    return False
+
+
+def extract_reference_section(text: str) -> str:
+    lines = [line.rstrip() for line in text.splitlines()]
+    heading_patterns = (
+        "参考资料",
+        "参考来源",
+        "资料来源",
+        "参考链接",
+        "引用来源",
+        "sources",
+        "references",
+    )
+    collecting = False
+    collected_lines: list[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+        normalized = stripped.lower().rstrip(":：")
+        if not collecting and normalized in heading_patterns:
+            collecting = True
+            continue
+        if not collecting:
+            continue
+        if not stripped:
+            if collected_lines:
+                break
+            continue
+        collected_lines.append(stripped)
+        if len(collected_lines) >= 12:
+            break
+
+    return "\n".join(collected_lines).strip()
+
+
+def format_sources(text: str, links: list[dict[str, str]]) -> str:
+    items: list[str] = []
+    seen: set[str] = set()
+    seen_urls: set[str] = set()
+    url_pattern = re.compile(r"https?://[^\s)\]}>]+")
+
+    reference_section = extract_reference_section(text)
+    if reference_section:
+        for line in reference_section.splitlines():
+            normalized = line.strip()
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                items.append(normalized)
+                seen_urls.update(url_pattern.findall(normalized))
+
+    for link in links:
+        href = (link.get("href") or "").strip()
+        label = " ".join((link.get("text") or "").split())
+        candidate = f"{label} {href}".strip() if label else href
+        if href and href not in seen_urls and candidate not in seen:
+            seen.add(candidate)
+            items.append(candidate)
+            seen_urls.add(href)
+
+    for url in url_pattern.findall(text):
+        if url not in seen and url not in seen_urls:
+            seen.add(url)
+            items.append(url)
+            seen_urls.add(url)
+
+    return "\n".join(items)
+
+
+def normalize_source_url(url: str) -> str:
+    return url.strip().rstrip("/")
+
+
+def dedupe_source_records(records: list[SourceRecord]) -> list[SourceRecord]:
+    deduped: list[SourceRecord] = []
+    seen_keys: set[tuple[str, str, str]] = set()
+
+    for record in records:
+        normalized = SourceRecord(
+            url=(record.url or "").strip(),
+            title=(record.title or "").strip(),
+            app_name=(record.app_name or "").strip(),
+        )
+        if not any((normalized.url, normalized.title, normalized.app_name)):
+            continue
+        key = (
+            normalize_source_url(normalized.url),
+            normalized.title,
+            normalized.app_name,
+        )
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        deduped.append(normalized)
+
+    return deduped
+
+
+def build_structured_source_fields(records: list[SourceRecord]) -> tuple[str, str, str]:
+    records = dedupe_source_records(records)
+    sources = "\n".join(
+        dict.fromkeys(record.app_name for record in records if record.app_name).keys()
+    )
+    source_urls = "\n".join(
+        dict.fromkeys(record.url for record in records if record.url).keys()
+    )
+    source_titles = "\n".join(
+        dict.fromkeys(record.title for record in records if record.title).keys()
+    )
+    return sources, source_urls, source_titles
+
+
+def _extract_structured_source_records_from_loaded_page(
+    page,
+    expected_prompt: str = "",
+    expected_response_text: str = "",
+) -> list[SourceRecord]:
+    try:
+        payload = page.evaluate(
+            r"""(args) => {
+            const expectedPrompt = args?.expectedPrompt || '';
+            const expectedResponseText = args?.expectedResponseText || '';
+            const routerData = window._ROUTER_DATA;
+            const cells = routerData?.loaderData?.chat_layout?.trimmedChainRecentConvCells;
+            if (!Array.isArray(cells)) {
+                return [];
+            }
+
+            const activeConversationId = (() => {
+                const match = String(globalThis.location?.pathname || '').match(/\/chat\/([^/?#]+)/);
+                return match ? match[1] : '';
+            })();
+            const promptText = String(expectedPrompt || '').trim();
+            const responseText = String(expectedResponseText || '').trim();
+            const normalizeUrl = (value) => String(value || '').trim().replace(/\/+$/, '');
+            const normalizeText = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+            const responseSample = normalizeText(responseText).slice(0, 120);
+
+            const extractMessageText = (message) => {
+                if (!message) {
+                    return '';
+                }
+                const blocks = Array.isArray(message.content_block) ? message.content_block : [];
+                for (const block of blocks) {
+                    const text = block?.content?.text_block?.text;
+                    if (text) {
+                        return String(text).trim();
+                    }
+                }
+                return String(message?.tts_content || message?.content || message?.brief || '').trim();
+            };
+            const messageMatchesResponse = (message) => {
+                if (!responseSample) {
+                    return true;
+                }
+                const messageText = normalizeText(extractMessageText(message));
+                if (!messageText) {
+                    return false;
+                }
+                const messageSample = messageText.slice(0, 120);
+                return (
+                    messageText.includes(responseSample) ||
+                    responseSample.includes(messageSample) ||
+                    messageSample.includes(responseSample)
+                );
+            };
+
+            const getSearchMessage = (conversation) => {
+                if (!conversation || !Array.isArray(conversation.messages)) {
+                    return null;
+                }
+
+                const messages = conversation.messages;
+                for (const message of messages) {
+                    if (message?.user_type !== 2) {
+                        continue;
+                    }
+                    if (!messageMatchesResponse(message)) {
+                        continue;
+                    }
+                    const blocks = Array.isArray(message?.content_block) ? message.content_block : [];
+                    if (blocks.some((block) => block?.content?.search_query_result_block)) {
+                        return message;
+                    }
+                }
+
+                if (promptText) {
+                    const normalizedPrompt = normalizeText(promptText);
+                    for (const message of messages) {
+                        if (message?.user_type !== 2) {
+                            continue;
+                        }
+                        const messageText = normalizeText(extractMessageText(message));
+                        if (
+                            messageText &&
+                            (messageText.includes(normalizedPrompt) ||
+                                normalizedPrompt.includes(messageText.slice(0, 80)))
+                        ) {
+                            const blocks = Array.isArray(message?.content_block) ? message.content_block : [];
+                            if (blocks.some((block) => block?.content?.search_query_result_block)) {
+                                return message;
+                            }
+                        }
+                    }
+                }
+
+                for (const message of messages) {
+                    if (message?.user_type !== 2) {
+                        continue;
+                    }
+                    const blocks = Array.isArray(message?.content_block) ? message.content_block : [];
+                    if (blocks.some((block) => block?.content?.search_query_result_block)) {
+                        return message;
+                    }
+                }
+
+                return null;
+            };
+
+            const conversations = cells
+                .map((cell) => cell?.conversation)
+                .filter((conversation) => conversation && Array.isArray(conversation.messages));
+            conversations.sort((left, right) => {
+                const leftActive = String(left?.conversation_id || '') === activeConversationId ? 1 : 0;
+                const rightActive = String(right?.conversation_id || '') === activeConversationId ? 1 : 0;
+                if (leftActive !== rightActive) {
+                    return rightActive - leftActive;
+                }
+                const leftTime = Number(left?.update_time || left?.create_time || 0);
+                const rightTime = Number(right?.update_time || right?.create_time || 0);
+                return rightTime - leftTime;
+            });
+
+            for (const conversation of conversations) {
+                const message = getSearchMessage(conversation);
+                if (!message) {
+                    continue;
+                }
+
+                const blocks = Array.isArray(message?.content_block) ? message.content_block : [];
+                const collected = [];
+
+                for (const block of blocks) {
+                    const searchBlock = block?.content?.search_query_result_block;
+                    if (!searchBlock) {
+                        continue;
+                    }
+
+                    const titleLookup = new Map();
+                    const results = Array.isArray(searchBlock.results) ? searchBlock.results : [];
+                    for (const result of results) {
+                        const card = result?.text_card;
+                        if (!card) {
+                            continue;
+                        }
+                        const url = String(card.url || '').trim();
+                        const title = String(card.title || '').trim();
+                        const appName = String(card.sitename || '').trim();
+                        const docId = String(card.doc_id || '').trim();
+                        if (url) {
+                            titleLookup.set(normalizeUrl(url), { title, appName });
+                        }
+                        if (docId) {
+                            titleLookup.set(`doc:${docId}`, { title, appName });
+                        }
+                        if (url || title || appName) {
+                            collected.push({ url, title, app_name: appName });
+                        }
+                    }
+
+                    const mediaResults = Array.isArray(searchBlock.vlm_rich_media_results)
+                        ? searchBlock.vlm_rich_media_results
+                        : [];
+                    for (const media of mediaResults) {
+                        const source = media?.image || media?.video || media?.audio || {};
+                        const url = String(source.main_site_url || source.host_page_url || '').trim();
+                        const docId = String(source.doc_id || '').trim();
+                        const fromUrl = titleLookup.get(normalizeUrl(url)) || null;
+                        const fromDoc = titleLookup.get(`doc:${docId}`) || null;
+                        const matched = fromUrl || fromDoc || {};
+                        const title = String(
+                            matched.title || source.video_captions || source.img_caption || ''
+                        ).trim();
+                        const appName = String(
+                            source.source_app_name || matched.appName || ''
+                        ).trim();
+                        if (url || title || appName) {
+                            collected.push({ url, title, app_name: appName });
+                        }
+                    }
+                }
+
+                if (collected.length > 0) {
+                    return collected;
+                }
+            }
+
+            return [];
+        }"""
+            ,
+            {
+                "expectedPrompt": expected_prompt,
+                "expectedResponseText": expected_response_text,
+            },
+        )
+    except PlaywrightError:
+        return []
+    if not isinstance(payload, list):
+        return []
+
+    records: list[SourceRecord] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        records.append(
+            SourceRecord(
+                url=str(item.get("url") or "").strip(),
+                title=str(item.get("title") or "").strip(),
+                app_name=str(item.get("app_name") or "").strip(),
+            )
+        )
+    return dedupe_source_records(records)
+
+
+def get_structured_source_records(
+    page,
+    expected_prompt: str = "",
+    expected_response_text: str = "",
+) -> list[SourceRecord]:
+    current_url = ""
+    try:
+        current_url = page.url
+    except PlaywrightError:
+        current_url = ""
+
+    if "/chat/" in current_url:
+        temp_page = page.context.new_page()
+        try:
+            temp_page.goto(current_url, wait_until="domcontentloaded")
+            temp_page.wait_for_timeout(2000)
+            records = _extract_structured_source_records_from_loaded_page(
+                temp_page,
+                expected_prompt=expected_prompt,
+                expected_response_text=expected_response_text,
+            )
+            if records:
+                return records
+        except PlaywrightError:
+            pass
+        finally:
+            try:
+                temp_page.close()
+            except PlaywrightError:
+                pass
+
+    return _extract_structured_source_records_from_loaded_page(
+        page,
+        expected_prompt=expected_prompt,
+        expected_response_text=expected_response_text,
+    )
+
+
+def get_last_response_data(page, selectors: list[str], expected_prompt: str = "") -> ResponseData:
     for selector in selectors:
         locator = page.locator(selector)
         count = locator.count()
         if count == 0:
             continue
-        text = locator.nth(count - 1).inner_text().strip()
+        response = locator.nth(count - 1)
+        try:
+            payload = response.evaluate(
+                """(el) => ({
+                    text: (el.innerText || '').trim(),
+                    links: Array.from(el.querySelectorAll('a[href]')).map((link) => ({
+                        text: (link.innerText || '').trim(),
+                        href: link.href || ''
+                    }))
+                })"""
+            )
+        except PlaywrightError:
+            continue
+
+        text = str(payload.get("text") or "").strip()
         if text:
-            return text
-    return ""
+            links = payload.get("links") or []
+            structured_sources = get_structured_source_records(
+                page,
+                expected_prompt=expected_prompt,
+                expected_response_text=text,
+            )
+            if structured_sources:
+                sources, source_urls, source_titles = build_structured_source_fields(structured_sources)
+                return ResponseData(
+                    text=text,
+                    sources=sources,
+                    source_urls=source_urls,
+                    source_titles=source_titles,
+                )
+            return ResponseData(text=text, sources=format_sources(text, links))
+    return ResponseData(text="", sources="")
 
 
 def get_response_count(page, selectors: list[str]) -> int:
@@ -239,14 +798,26 @@ def prepare_input(locator, prompt: str, clear_input_hotkey: str) -> None:
     locator.type(prompt, delay=20)
 
 
-def wait_for_response(page, config: AppConfig, previous_count: int, previous_text: str) -> str:
+def wait_for_response(
+    page,
+    config: AppConfig,
+    previous_count: int,
+    previous_text: str,
+    expected_prompt: str,
+) -> str:
     deadline = time.time() + config.chat.response_timeout_seconds
     latest_text = previous_text
     stable_rounds = 0
 
     while time.time() < deadline:
+        handle_popup_if_present(page, config)
         current_count = get_response_count(page, config.chat.response_selectors)
-        current_text = get_last_response_text(page, config.chat.response_selectors)
+        current_response = get_last_response_data(
+            page,
+            config.chat.response_selectors,
+            expected_prompt=expected_prompt,
+        )
+        current_text = current_response.text
         response_arrived = current_count > previous_count or (
             current_text and current_text != previous_text
         )
@@ -261,38 +832,56 @@ def wait_for_response(page, config: AppConfig, previous_count: int, previous_tex
             if stable_rounds >= config.chat.stability_checks and not is_loading(
                 page, config.chat.loading_selectors
             ):
-                return current_text
+                return current_response
 
         time.sleep(config.chat.poll_interval_seconds)
 
     raise TimeoutError(f"Timed out waiting for {config.chat.platform_name} to finish responding.")
 
 
-def send_prompt(page, config: AppConfig, prompt: str) -> str:
+def send_prompt(page, config: AppConfig, prompt: str) -> ResponseData:
     if config.chat.new_chat_each_prompt:
         click_if_present(page, config.chat.new_chat_selectors, config.browser.action_timeout_ms)
         time.sleep(1)
 
+    handle_popup_if_present(page, config)
     _, input_locator = ensure_chat_ready(page, config)
     previous_count = get_response_count(page, config.chat.response_selectors)
-    previous_text = get_last_response_text(page, config.chat.response_selectors)
+    previous_text = get_last_response_data(page, config.chat.response_selectors).text
 
     prepare_input(input_locator, prompt, config.chat.clear_input_hotkey)
     if not click_if_present(page, config.chat.send_button_selectors, config.browser.action_timeout_ms):
         input_locator.press(config.chat.send_hotkey)
 
-    return wait_for_response(page, config, previous_count, previous_text)
+    handle_popup_if_present(page, config)
+    return wait_for_response(page, config, previous_count, previous_text, prompt)
 
 
 def main() -> int:
     args = parse_args()
     config_path = Path(args.config).expanduser().resolve()
     config = load_config(config_path)
+    if not config.excel.path.exists():
+        raise FileNotFoundError(
+            f"Excel file not found: {config.excel.path}. "
+            "Update excel.path in the config or create the workbook first."
+        )
 
     workbook = load_workbook(config.excel.path)
     sheet = workbook[config.excel.sheet] if config.excel.sheet else workbook.active
     prompt_col = column_index_by_header(sheet, config.excel.header_row, config.excel.prompt_column)
     result_col = column_index_by_header(sheet, config.excel.header_row, config.excel.result_column)
+    source_col = ensure_column_index_by_header(sheet, config.excel.header_row, config.excel.source_column)
+    source_urls_col = ensure_column_index_by_header(
+        sheet,
+        config.excel.header_row,
+        "source_urls" if source_col is not None else None,
+    )
+    source_titles_col = ensure_column_index_by_header(
+        sheet,
+        config.excel.header_row,
+        "source_titles" if source_col is not None else None,
+    )
 
     rows = list(iter_candidate_rows(sheet, config.excel, overwrite=args.overwrite))
     if args.limit is not None:
@@ -328,15 +917,29 @@ def main() -> int:
                 )
                 input()
                 ensure_chat_ready(page, config)
+        handle_popup_if_present(page, config)
 
         for index, row_idx in enumerate(rows, start=1):
             prompt = str(sheet.cell(row=row_idx, column=prompt_col).value).strip()
             print(f"[{index}/{len(rows)}] Processing row {row_idx}")
             try:
-                result = send_prompt(page, config, prompt)
+                response = send_prompt(page, config, prompt)
+                result = response.text
+                sources = response.sources
+                source_urls = response.source_urls
+                source_titles = response.source_titles
             except (PlaywrightError, PlaywrightTimeoutError, TimeoutError) as exc:
                 result = f"ERROR: {exc}"
+                sources = ""
+                source_urls = ""
+                source_titles = ""
             sheet.cell(row=row_idx, column=result_col).value = result
+            if source_col is not None:
+                sheet.cell(row=row_idx, column=source_col).value = sources
+            if source_urls_col is not None:
+                sheet.cell(row=row_idx, column=source_urls_col).value = source_urls
+            if source_titles_col is not None:
+                sheet.cell(row=row_idx, column=source_titles_col).value = source_titles
             workbook.save(config.excel.path)
 
         context.close()

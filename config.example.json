@@ -5,6 +5,7 @@
     "header_row": 1,
     "prompt_column": "prompt",
     "result_column": "result",
+    "source_column": "sources",
     "start_row": 2,
     "skip_completed": true
   },
@@ -45,7 +46,7 @@
     "stability_checks": 3,
     "poll_interval_seconds": 1.0,
     "send_hotkey": "Enter",
-    "clear_input_hotkey": "Meta+A",
+    "clear_input_hotkey": "Control+A",
     "new_chat_each_prompt": true,
     "manual_login": true
   }

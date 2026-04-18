@@ -1,148 +1,161 @@
 # BigModel Excel Bot
 
-从 Excel 读取提示词，顺序发送到任意一个支持网页聊天的大模型页面，再把回答写回 Excel 的 `result` 列。
+把 Excel 里的 `prompt` 逐行发送到网页聊天模型，再把回答写回 Excel。
 
-当前已经验证通过的 provider 是豆包，但项目本身不再绑定豆包，核心思路是：
+当前仓库保留的是一套最小可用核心：
+- [main.py](/D:/projects/geo/bigmodel-excel-bot/main.py)
+- [requirements.txt](/D:/projects/geo/bigmodel-excel-bot/requirements.txt)
+- [config.example.json](/D:/projects/geo/bigmodel-excel-bot/config.example.json)
+- [config.doubao.json](/D:/projects/geo/bigmodel-excel-bot/config.doubao.json)
+- [config.json](/D:/projects/geo/bigmodel-excel-bot/config.json)
+- [mock_chat.html](/D:/projects/geo/bigmodel-excel-bot/mock_chat.html)
+- [data/prompts.xlsx](/D:/projects/geo/bigmodel-excel-bot/data/prompts.xlsx)
 
-1. `openpyxl` 读写 Excel
-2. `Playwright` 打开浏览器并复用登录态
-3. 通过配置里的选择器定位输入框、发送按钮、回答区域
-4. 逐行发送 prompt
-5. 等待回答稳定后回写到 Excel
+**功能**
 
-## 适用场景
+- 从 Excel 读取 `prompt` 列
+- 顺序发送到网页聊天页
+- 把回答写回 `result` 列
+- 如果配置了 `excel.source_column`，同步写入来源
+- 对豆包优先提取结构化来源，必要时自动新增 `source_urls`、`source_titles`
 
-- 你手上有一份 Excel
-- 其中一列是 prompt
-- 需要串行处理，避免并发上下文串扰
-- 想走网页自动化，而不是官方 API
-- 不同平台只想改配置，不想改代码
+**安装**
 
-## 目录
+```bash
+python -m pip install -r requirements.txt
+```
 
-- [main.py](xxxxx/bigmodel-excel-bot/main.py): 主脚本
-- [config.example.json](xxxxx/bigmodel-excel-bot/config.example.json): 通用配置模板
-- [config.json](xxxxxxxxxx/bigmodel-excel-bot/config.json): 当前可运行配置
+如果本机还没装 Playwright 浏览器依赖，补一条：
 
-## Excel 约定
+```bash
+python -m playwright install chromium
+```
 
-默认读取表头：
+**快速开始**
 
-- `prompt`
-- `result`
+本地模拟页面验证：
 
-例如：
+```bash
+python main.py --config config.json --limit 2
+```
+
+豆包实跑：
+
+```bash
+python main.py --config config.doubao.json
+```
+
+首次跑豆包时会复用 [browser-profile-doubao](/D:/projects/geo/bigmodel-excel-bot/browser-profile-doubao) 里的登录态；如果未登录，脚本会等待你手动登录。
+
+**Excel 格式**
+
+最少需要两列：
 
 | prompt | result |
 | --- | --- |
-| 帮我总结这段话 | |
+| 帮我总结这段内容 | |
 | 给我一个标题 | |
 
-## 使用步骤
+如果启用来源列，脚本会使用这些表头：
 
-1. 进入目录：
+| prompt | result | sources | source_urls | source_titles |
+| --- | --- | --- | --- | --- |
 
-```bash
-cd /xxxxx/code/bigmodel-excel-bot
-```
+字段含义：
 
-2. 安装依赖：
+- `prompt`：输入给模型的问题
+- `result`：模型回答
+- `sources`：来源应用名或站点名
+- `source_urls`：来源 URL，一行一个
+- `source_titles`：来源标题，一行一个
 
-```bash
-python3 -m pip install -r requirements.txt
-```
+**配置说明**
 
-3. 准备配置：
+`excel`
 
-```bash
-cp config.example.json config.json
-```
+- `path`：Excel 路径
+- `sheet`：工作表名；不填则使用当前激活 sheet
+- `header_row`：表头行号
+- `prompt_column`：提示词列名
+- `result_column`：结果列名
+- `source_column`：来源列名；不填则不写来源
+- `start_row`：起始处理行
+- `skip_completed`：已有结果时是否跳过
 
-4. 修改 `config.json`
+`browser`
 
-5. 运行：
+- `start_url`：聊天页面地址
+- `user_data_dir`：浏览器用户目录，用于复用登录态
+- `channel`：浏览器通道，当前主要用 `chrome`
+- `headless`：是否无头运行
+- `startup_wait_ms`：页面初始等待时间
+- `action_timeout_ms`：单次浏览器操作超时
 
-```bash
-python3 main.py --config config.json
-```
+`chat`
 
-## 常用参数
+- `platform_name`：平台名称，仅用于日志
+- `input_selectors`：输入框候选选择器
+- `send_button_selectors`：发送按钮候选选择器
+- `response_selectors`：回答区域候选选择器
+- `new_chat_selectors`：新对话按钮候选选择器
+- `loading_selectors`：生成中状态候选选择器
+- `popup_selectors`：弹窗候选选择器
+- `popup_confirm_selectors`：弹窗确认按钮候选选择器
+- `response_timeout_seconds`：单条回答等待上限
+- `stability_checks`：回答稳定轮数
+- `poll_interval_seconds`：轮询间隔
+- `send_hotkey`：找不到发送按钮时使用的快捷键
+- `clear_input_hotkey`：清空输入框快捷键
+- `new_chat_each_prompt`：每条问题前是否先新建对话
+- `manual_login`：未登录时是否等待手动登录
+- `manual_popup_confirmation`：遇到风控/验证弹窗时是否等待人工处理
+
+**来源提取**
+
+通用兜底逻辑：
+
+- 优先提取回答节点里的真实链接
+- 如果没有链接，则尝试从回答正文里的“参考资料 / Sources / 参考来源”等段落提取
+
+豆包增强逻辑：
+
+- 从当前会话页的前端状态读取结构化来源
+- 提取 `sitename / url / title`
+- 分别写入 `sources / source_urls / source_titles`
+
+之所以会额外打开当前 `/chat/<conversation_id>` 页面，是因为豆包主页面是 SPA，直接读取当前页状态容易混入历史会话；重新打开当前会话页后，结构化来源更稳定。
+
+**常用命令**
 
 只跑前 5 行：
 
 ```bash
-python3 main.py --config config.json --limit 5
+python main.py --config config.doubao.json --limit 5
 ```
 
-覆盖已有结果重新跑：
+覆盖已有结果：
 
 ```bash
-python3 main.py --config config.json --overwrite
+python main.py --config config.doubao.json --overwrite
 ```
 
-## 配置说明
+**保留文件建议**
 
-### `excel`
+建议长期保留：
 
-- `path`: Excel 路径
-- `sheet`: 工作表名，不填则用当前激活 sheet
-- `header_row`: 表头所在行
-- `prompt_column`: prompt 列名
-- `result_column`: result 列名
-- `start_row`: 起始处理行
-- `skip_completed`: 已有结果是否跳过
+- 代码与配置文件
+- [data/prompts.xlsx](/D:/projects/geo/bigmodel-excel-bot/data/prompts.xlsx)
+- 浏览器登录目录 `browser-profile*`
 
-### `browser`
+可随时删除、需要时再生成：
 
-- `start_url`: 打开的聊天页面地址
-- `user_data_dir`: 浏览器用户目录，用来复用登录态
-- `channel`: `chrome` 表示调用本机 Chrome
-- `headless`: 是否无头模式
-- `startup_wait_ms`: 打开页面后的初始等待时间
-- `action_timeout_ms`: 浏览器动作超时
+- `__pycache__/`
+- 调试截图、调试 HTML
+- 临时验证 Excel
+- Excel 锁文件 `~$*.xlsx`
 
-### `chat`
+**已知限制**
 
-- `platform_name`: 平台名，只用于日志和提示
-- `input_selectors`: 输入框候选选择器
-- `send_button_selectors`: 发送按钮候选选择器
-- `response_selectors`: 回答区域候选选择器
-- `new_chat_selectors`: 新对话按钮候选选择器
-- `loading_selectors`: 生成中状态候选选择器
-- `response_timeout_seconds`: 单条回答等待超时
-- `stability_checks`: 连续几轮文本不变后，判定回答结束
-- `poll_interval_seconds`: 轮询间隔
-- `send_hotkey`: 如果找不到发送按钮，退化为按键发送
-- `clear_input_hotkey`: 清空输入框快捷键，macOS 通常是 `Meta+A`
-- `new_chat_each_prompt`: 每条 prompt 前是否先点“新对话”
-- `manual_login`: 未登录时是否等待你手动登录
-
-## 豆包示例
-
-当前 `config.json` 就是豆包配置，核心是：
-
-- `browser.start_url`: `https://www.doubao.com/chat/`
-- `chat.platform_name`: `doubao`
-- `chat.response_selectors`: 包含 `.flow-markdown-body`
-
-如果你后面要适配别的平台，比如 Kimi、DeepSeek、元宝、通义，通常只需要改：
-
-- `start_url`
-- `input_selectors`
-- `send_button_selectors`
-- `response_selectors`
-- `new_chat_selectors`
-- `loading_selectors`
-
-## 兼容性
-
-代码对旧格式做了兼容：
-
-- 新格式推荐使用 `chat`
-- 老的 `doubao` 配置段仍然能读
-
-## 限制
-
-1. 这是网页自动化，不是官方 API，页面结构一变就可能要调选择器。
-2. 如果平台有验证码、风控、限流、强制弹窗，中途会影响自动化。
-3. 不同平台的发送动作不完全一样，极端情况下需要再补平台特定逻辑。
+- 这是网页自动化，不是官方 API，页面结构变了就需要改选择器
+- 豆包等平台如果触发验证码、风控或人工确认，脚本会暂停等待
+- 来源质量受模型当前回答方式影响；如果平台本身没返回结构化来源，只能退回正文链接提取

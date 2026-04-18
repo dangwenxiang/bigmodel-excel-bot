@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mock Chat</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 0;
+      padding: 24px;
+      background: #f5f7fb;
+      color: #1f2937;
+    }
+
+    .app {
+      max-width: 880px;
+      margin: 0 auto;
+      background: #ffffff;
+      border: 1px solid #dbe1ea;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 12px 36px rgba(15, 23, 42, 0.08);
+    }
+
+    .header {
+      padding: 20px 24px;
+      border-bottom: 1px solid #e5eaf1;
+      background: linear-gradient(135deg, #eff6ff, #f8fafc);
+    }
+
+    .header h1 {
+      margin: 0;
+      font-size: 20px;
+    }
+
+    .messages {
+      min-height: 260px;
+      padding: 24px;
+      display: grid;
+      gap: 12px;
+      background: #fcfdff;
+    }
+
+    .assistant-message {
+      padding: 14px 16px;
+      border-radius: 10px;
+      background: #e0f2fe;
+      line-height: 1.5;
+      white-space: pre-wrap;
+    }
+
+    .composer {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 12px;
+      padding: 20px 24px 24px;
+      border-top: 1px solid #e5eaf1;
+      background: #ffffff;
+    }
+
+    textarea {
+      min-height: 88px;
+      resize: vertical;
+      padding: 12px;
+      font: inherit;
+      border: 1px solid #cbd5e1;
+      border-radius: 10px;
+    }
+
+    button {
+      align-self: end;
+      height: 44px;
+      padding: 0 18px;
+      border: 0;
+      border-radius: 10px;
+      background: #0f172a;
+      color: #ffffff;
+      font: inherit;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div class="header">
+      <h1>Mock Chat</h1>
+    </div>
+    <div class="messages" id="responses">
+      <div class="assistant-message">Ready for smoke tests.</div>
+    </div>
+    <div class="composer">
+      <textarea placeholder="Type a prompt"></textarea>
+      <button type="submit">Send</button>
+    </div>
+  </div>
+
+  <script>
+    const input = document.querySelector("textarea");
+    const button = document.querySelector("button[type='submit']");
+    const responses = document.getElementById("responses");
+
+    function appendResponse(prompt) {
+      const div = document.createElement("div");
+      div.className = "assistant-message";
+      div.textContent = "Echo: " + prompt;
+      responses.appendChild(div);
+    }
+
+    button.addEventListener("click", () => appendResponse(input.value));
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        appendResponse(input.value);
+      }
+    });
+  </script>
+</body>
+</html>

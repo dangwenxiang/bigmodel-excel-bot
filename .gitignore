@@ -2,5 +2,8 @@ __pycache__/
 *.pyc
 .DS_Store
 browser-profile/
-data/
-config.json
+browser-profile-doubao/
+artifacts/
+~$*.xlsx
+doubao-*-debug.png
+doubao-*-debug.html
