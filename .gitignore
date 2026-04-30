@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
+.venv/
 .DS_Store
 browser-profile/
 browser-profile-doubao/
@@ -7,3 +8,10 @@ artifacts/
 ~$*.xlsx
 doubao-*-debug.png
 doubao-*-debug.html
+*.log
+*.err.log
+*.out.log
+article_generator/outputs/
+material_parser/outputs/
+indexing_test/data/geo-runs/
+indexing_test/data/live-source-*.json

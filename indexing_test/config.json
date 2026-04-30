@@ -1,0 +1,41 @@
+{
+  "excel": {
+    "path": "./data/prompts.xlsx",
+    "sheet": "Sheet1",
+    "header_row": 1,
+    "prompt_column": "prompt",
+    "result_column": "result",
+    "source_column": "sources",
+    "start_row": 2,
+    "skip_completed": true
+  },
+  "browser": {
+    "start_url": "./mock_chat.html",
+    "user_data_dir": "./browser-profile",
+    "channel": "chrome",
+    "headless": true,
+    "startup_wait_ms": 500,
+    "action_timeout_ms": 5000
+  },
+  "chat": {
+    "platform_name": "mock-chat",
+    "input_selectors": [
+      "textarea"
+    ],
+    "send_button_selectors": [
+      "button[type='submit']"
+    ],
+    "response_selectors": [
+      ".assistant-message"
+    ],
+    "new_chat_selectors": [],
+    "loading_selectors": [],
+    "response_timeout_seconds": 5,
+    "stability_checks": 1,
+    "poll_interval_seconds": 0.5,
+    "send_hotkey": "Enter",
+    "clear_input_hotkey": "Control+A",
+    "new_chat_each_prompt": false,
+    "manual_login": false
+  }
+}

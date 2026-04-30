@@ -1,0 +1,53 @@
+{
+  "excel": {
+    "path": "./data/prompts.xlsx",
+    "sheet": "Sheet1",
+    "header_row": 1,
+    "prompt_column": "prompt",
+    "result_column": "result",
+    "source_column": "sources",
+    "start_row": 2,
+    "skip_completed": true
+  },
+  "browser": {
+    "start_url": "https://www.example.com/chat/",
+    "user_data_dir": "./browser-profile",
+    "channel": "chrome",
+    "headless": false,
+    "startup_wait_ms": 3000,
+    "action_timeout_ms": 15000
+  },
+  "chat": {
+    "platform_name": "example-chat",
+    "input_selectors": [
+      "textarea",
+      "[contenteditable='true']"
+    ],
+    "send_button_selectors": [
+      "button[type='submit']",
+      "button[aria-label*='发送']",
+      "button:has-text('发送')"
+    ],
+    "response_selectors": [
+      ".assistant-message",
+      ".markdown-body",
+      "[data-message-author-role='assistant']"
+    ],
+    "new_chat_selectors": [
+      "button:has-text('新对话')",
+      "button:has-text('New Chat')"
+    ],
+    "loading_selectors": [
+      ".loading",
+      ".spinner",
+      "[aria-busy='true']"
+    ],
+    "response_timeout_seconds": 180,
+    "stability_checks": 3,
+    "poll_interval_seconds": 1.0,
+    "send_hotkey": "Enter",
+    "clear_input_hotkey": "Control+A",
+    "new_chat_each_prompt": true,
+    "manual_login": true
+  }
+}
