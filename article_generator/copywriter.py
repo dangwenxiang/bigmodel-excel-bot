@@ -181,7 +181,7 @@ def send_article_generation_prompt(
     ).text
 
     if files:
-        upload_documents(page, files, upload_selectors)
+        upload_documents(page, files, upload_selectors, input_locator=input_locator)
     prepare_input(input_locator, prompt, config.chat.clear_input_hotkey)
     if not click_if_present(page, config.chat.send_button_selectors, config.browser.action_timeout_ms):
         input_locator.press(config.chat.send_hotkey)
