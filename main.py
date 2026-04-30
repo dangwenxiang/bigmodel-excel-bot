@@ -483,6 +483,374 @@ def build_structured_source_fields(records: list[SourceRecord]) -> tuple[str, st
     return sources, source_urls, source_titles
 
 
+def get_nearby_dom_source_records(page, selectors: list[str]) -> list[SourceRecord]:
+    try:
+        payload = page.evaluate(
+            r"""(selectors) => {
+            const selectorText = selectors.join(',');
+            const responseNodes = Array.from(document.querySelectorAll(selectorText));
+            const responseNode = responseNodes.length ? responseNodes[responseNodes.length - 1] : null;
+            if (!responseNode) {
+                return [];
+            }
+
+            const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+            const isUsefulHref = (href) => {
+                const value = String(href || '').trim();
+                if (!value || value.startsWith('javascript:') || value.startsWith('data:')) {
+                    return false;
+                }
+                try {
+                    const url = new URL(value, location.href);
+                    if (url.hostname.endsWith('doubao.com') && url.pathname.startsWith('/chat')) {
+                        return false;
+                    }
+                    return true;
+                } catch {
+                    return false;
+                }
+            };
+            const toRecord = (link) => {
+                const href = link.href || link.getAttribute('href') || '';
+                let hostname = '';
+                try {
+                    hostname = new URL(href, location.href).hostname.replace(/^www\./, '');
+                } catch {}
+                return {
+                    url: href,
+                    title: normalize(link.innerText || link.getAttribute('title') || link.getAttribute('aria-label') || ''),
+                    app_name: normalize(link.getAttribute('data-site-name') || link.getAttribute('data-source') || hostname),
+                };
+            };
+
+            let current = responseNode;
+            for (let depth = 0; current && depth < 10; depth += 1, current = current.parentElement) {
+                const links = Array.from(current.querySelectorAll('a[href]'))
+                    .filter((link) => isUsefulHref(link.href || link.getAttribute('href')))
+                    .map(toRecord)
+                    .filter((item) => item.url || item.title || item.app_name);
+                if (links.length > 0) {
+                    return links.slice(0, 50);
+                }
+            }
+            return [];
+        }""",
+            selectors,
+        )
+    except PlaywrightError:
+        return []
+
+    if not isinstance(payload, list):
+        return []
+    records: list[SourceRecord] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        records.append(
+            SourceRecord(
+                url=str(item.get("url") or "").strip(),
+                title=str(item.get("title") or "").strip(),
+                app_name=str(item.get("app_name") or "").strip(),
+            )
+        )
+    return dedupe_source_records(records)
+
+
+def get_reference_panel_source_records(page) -> list[SourceRecord]:
+    try:
+        page.wait_for_function(
+            r"""() => Array.from(document.querySelectorAll('div,span,button,[role="button"]'))
+                .some((el) => {
+                    const text = String(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+                    const rect = el.getBoundingClientRect();
+                    return /^参考\s*\d+\s*篇资料$/.test(text) && rect.width > 0 && rect.height > 0;
+                })""",
+            timeout=5000,
+        )
+        clicked = page.evaluate(
+            r"""() => {
+            const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+            const isVisible = (el) => {
+                const rect = el.getBoundingClientRect();
+                const style = window.getComputedStyle(el);
+                return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+            };
+            const looksClickable = (el) => {
+                if (!el || !isVisible(el)) {
+                    return false;
+                }
+                const role = el.getAttribute('role') || '';
+                const cls = el.getAttribute('class') || '';
+                const style = window.getComputedStyle(el);
+                return Boolean(
+                    el.tagName === 'BUTTON' ||
+                    el.tagName === 'A' ||
+                    role === 'button' ||
+                    el.hasAttribute('onclick') ||
+                    el.hasAttribute('tabindex') ||
+                    style.cursor === 'pointer' ||
+                    /reference|ref|citation|source|search/i.test(cls)
+                );
+            };
+            const clickableTarget = (el) => {
+                let current = el;
+                for (let depth = 0; current && depth < 6; depth += 1, current = current.parentElement) {
+                    if (looksClickable(current)) {
+                        return current;
+                    }
+                }
+                return el;
+            };
+            const candidates = Array.from(document.querySelectorAll('div,span,button,[role="button"]'))
+                .filter((el) => /^参考\s*\d+\s*篇资料$/.test(normalize(el.innerText || el.textContent || '')))
+                .filter(isVisible);
+            const target = candidates.length ? candidates[candidates.length - 1] : null;
+            if (!target) {
+                return false;
+            }
+            const actionTarget = clickableTarget(target);
+            actionTarget.scrollIntoView({ block: 'center', inline: 'center' });
+            const rect = actionTarget.getBoundingClientRect();
+            const eventOptions = {
+                bubbles: true,
+                cancelable: true,
+                view: window,
+                clientX: rect.left + rect.width / 2,
+                clientY: rect.top + rect.height / 2,
+            };
+            for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click']) {
+                actionTarget.dispatchEvent(new MouseEvent(type, eventOptions));
+            }
+            if (typeof actionTarget.click === 'function') {
+                actionTarget.click();
+            }
+            return true;
+        }"""
+        )
+        if not clicked:
+            return []
+        page.wait_for_function(
+            r"""() => Array.from(document.querySelectorAll('a[href]'))
+                .some((link) => {
+                    const rect = link.getBoundingClientRect();
+                    const href = String(link.href || link.getAttribute('href') || '').trim();
+                    if (rect.width <= 0 || rect.height <= 0 || !href || href.startsWith('javascript:') || href.startsWith('data:')) {
+                        return false;
+                    }
+                    try {
+                        const url = new URL(href, location.href);
+                        return !(url.hostname.endsWith('doubao.com') && url.pathname.startsWith('/chat'));
+                    } catch {
+                        return false;
+                    }
+                })""",
+            timeout=5000,
+        )
+        payload = page.evaluate(
+            r"""() => {
+            const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+            const isUsefulHref = (href) => {
+                const value = String(href || '').trim();
+                if (!value || value.startsWith('javascript:') || value.startsWith('data:')) {
+                    return false;
+                }
+                try {
+                    const url = new URL(value, location.href);
+                    if (url.hostname.endsWith('doubao.com') && url.pathname.startsWith('/chat')) {
+                        return false;
+                    }
+                    return true;
+                } catch {
+                    return false;
+                }
+            };
+            return Array.from(document.querySelectorAll('a[href]'))
+                .filter((link) => {
+                    const rect = link.getBoundingClientRect();
+                    return rect.width > 0 && rect.height > 0 && isUsefulHref(link.href || link.getAttribute('href'));
+                })
+                .map((link) => {
+                    let hostname = '';
+                    try {
+                        hostname = new URL(link.href || link.getAttribute('href') || '', location.href).hostname.replace(/^www\./, '');
+                    } catch {}
+                    const text = normalize(link.innerText || link.textContent || '');
+                    const title = normalize(link.getAttribute('title') || link.getAttribute('aria-label') || '');
+                    return {
+                        url: link.href || link.getAttribute('href') || '',
+                        title: text || title,
+                        app_name: normalize(link.getAttribute('data-site-name') || link.getAttribute('data-source') || hostname),
+                    };
+                })
+                .filter((item) => item.url || item.title || item.app_name)
+                .slice(0, 50);
+        }"""
+        )
+    except PlaywrightError:
+        return []
+
+    if not isinstance(payload, list):
+        return []
+    records: list[SourceRecord] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        records.append(
+            SourceRecord(
+                url=str(item.get("url") or "").strip(),
+                title=str(item.get("title") or "").strip(),
+                app_name=str(item.get("app_name") or "").strip(),
+            )
+        )
+    return dedupe_source_records(records)
+
+
+def save_source_debug_artifact(
+    page,
+    config: AppConfig,
+    expected_prompt: str,
+    expected_response_text: str,
+    links: list[dict[str, str]],
+) -> Optional[Path]:
+    try:
+        payload = page.evaluate(
+            r"""(args) => {
+            const keywords = ['source', 'sources', 'reference', 'references', 'search', 'citation', 'url', 'title'];
+            const maxMatches = 300;
+            const maxDepth = 10;
+            const seen = new WeakSet();
+            const matches = [];
+
+            const short = (value) => {
+                if (value === null || value === undefined) {
+                    return value;
+                }
+                const text = String(value);
+                return text.length > 500 ? `${text.slice(0, 500)}...` : text;
+            };
+
+            const isInterestingKey = (key) => {
+                const lower = String(key || '').toLowerCase();
+                return keywords.some((keyword) => lower.includes(keyword));
+            };
+
+            const walk = (value, path, depth) => {
+                if (matches.length >= maxMatches || depth > maxDepth || value === null || value === undefined) {
+                    return;
+                }
+                if (typeof value !== 'object') {
+                    return;
+                }
+                if (seen.has(value)) {
+                    return;
+                }
+                seen.add(value);
+
+                if (Array.isArray(value)) {
+                    for (let index = 0; index < Math.min(value.length, 50); index += 1) {
+                        walk(value[index], `${path}[${index}]`, depth + 1);
+                    }
+                    return;
+                }
+
+                for (const [key, item] of Object.entries(value)) {
+                    const itemPath = path ? `${path}.${key}` : key;
+                    if (isInterestingKey(key)) {
+                        matches.push({
+                            path: itemPath,
+                            type: Array.isArray(item) ? 'array' : typeof item,
+                            value: typeof item === 'object' ? short(JSON.stringify(item)) : short(item),
+                        });
+                        if (matches.length >= maxMatches) {
+                            return;
+                        }
+                    }
+                    walk(item, itemPath, depth + 1);
+                }
+            };
+
+            const responseLinks = Array.from(document.querySelectorAll('a[href]')).map((link) => ({
+                text: (link.innerText || '').trim(),
+                href: link.href || '',
+                aria_label: link.getAttribute('aria-label') || '',
+                title: link.getAttribute('title') || '',
+                class: link.getAttribute('class') || '',
+            })).slice(-200);
+
+            const responseNodes = Array.from(document.querySelectorAll(args.responseSelectors.join(','))).map((el, index) => ({
+                index,
+                text_sample: (el.innerText || '').trim().slice(0, 800),
+                links: Array.from(el.querySelectorAll('a[href]')).map((link) => ({
+                    text: (link.innerText || '').trim(),
+                    href: link.href || '',
+                    aria_label: link.getAttribute('aria-label') || '',
+                    title: link.getAttribute('title') || '',
+                })),
+            })).slice(-10);
+            const lastResponseNode = responseNodes.length ? document.querySelectorAll(args.responseSelectors.join(','))[document.querySelectorAll(args.responseSelectors.join(',')).length - 1] : null;
+            const ancestor_nodes = [];
+            let current = lastResponseNode;
+            for (let depth = 0; current && depth < 10; depth += 1, current = current.parentElement) {
+                ancestor_nodes.push({
+                    depth,
+                    tag: current.tagName,
+                    class: current.getAttribute('class') || '',
+                    text_sample: (current.innerText || '').trim().slice(0, 1000),
+                    links: Array.from(current.querySelectorAll('a[href]')).map((link) => ({
+                        text: (link.innerText || '').trim(),
+                        href: link.href || '',
+                        aria_label: link.getAttribute('aria-label') || '',
+                        title: link.getAttribute('title') || '',
+                        class: link.getAttribute('class') || '',
+                    })).slice(0, 100),
+                });
+            }
+
+            const routerData = window._ROUTER_DATA || null;
+            walk(routerData, 'window._ROUTER_DATA', 0);
+
+            return {
+                page_url: location.href,
+                page_title: document.title,
+                expected_prompt: args.expectedPrompt,
+                expected_response_sample: String(args.expectedResponseText || '').slice(0, 1000),
+                router_data_exists: Boolean(routerData),
+                router_data_top_keys: routerData && typeof routerData === 'object' ? Object.keys(routerData) : [],
+                interesting_router_matches: matches,
+                all_page_links_tail: responseLinks,
+                response_nodes: responseNodes,
+                ancestor_nodes,
+            };
+        }""",
+            {
+                "expectedPrompt": expected_prompt,
+                "expectedResponseText": expected_response_text,
+                "responseSelectors": config.chat.response_selectors,
+            },
+        )
+    except PlaywrightError as exc:
+        payload = {"error": str(exc)}
+
+    debug_dir = config.chat.popup_artifact_dir.parent / "source-debug"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    output_path = debug_dir / f"{config.chat.platform_name}-{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}.json"
+    output_path.write_text(
+        json.dumps(
+            {
+                "captured_at": datetime.now().isoformat(),
+                "expected_prompt": expected_prompt,
+                "expected_response_sample": expected_response_text[:1000],
+                "dom_links_from_response_node": links,
+                "page_probe": payload,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return output_path
+
+
 def _extract_structured_source_records_from_loaded_page(
     page,
     expected_prompt: str = "",
@@ -494,7 +862,9 @@ def _extract_structured_source_records_from_loaded_page(
             const expectedPrompt = args?.expectedPrompt || '';
             const expectedResponseText = args?.expectedResponseText || '';
             const routerData = window._ROUTER_DATA;
-            const cells = routerData?.loaderData?.chat_layout?.trimmedChainRecentConvCells;
+            const chatLayout = routerData?.loaderData?.chat_layout;
+            const cells = chatLayout?.trimmedChainRecentConvCells ||
+                chatLayout?.chat_layout?.trimmedChainRecentConvCells;
             if (!Array.isArray(cells)) {
                 return [];
             }
@@ -574,16 +944,6 @@ def _extract_structured_source_records_from_loaded_page(
                                 return message;
                             }
                         }
-                    }
-                }
-
-                for (const message of messages) {
-                    if (message?.user_type !== 2) {
-                        continue;
-                    }
-                    const blocks = Array.isArray(message?.content_block) ? message.content_block : [];
-                    if (blocks.some((block) => block?.content?.search_query_result_block)) {
-                        return message;
                     }
                 }
 
@@ -733,7 +1093,13 @@ def get_structured_source_records(
     )
 
 
-def get_last_response_data(page, selectors: list[str], expected_prompt: str = "") -> ResponseData:
+def get_last_response_data(
+    page,
+    config: AppConfig,
+    selectors: list[str],
+    expected_prompt: str = "",
+    include_sources: bool = True,
+) -> ResponseData:
     for selector in selectors:
         locator = page.locator(selector)
         count = locator.count()
@@ -756,6 +1122,8 @@ def get_last_response_data(page, selectors: list[str], expected_prompt: str = ""
         text = str(payload.get("text") or "").strip()
         if text:
             links = payload.get("links") or []
+            if not include_sources:
+                return ResponseData(text=text, sources="")
             structured_sources = get_structured_source_records(
                 page,
                 expected_prompt=expected_prompt,
@@ -769,7 +1137,38 @@ def get_last_response_data(page, selectors: list[str], expected_prompt: str = ""
                     source_urls=source_urls,
                     source_titles=source_titles,
                 )
-            return ResponseData(text=text, sources=format_sources(text, links))
+            nearby_sources = get_nearby_dom_source_records(page, selectors)
+            if nearby_sources:
+                sources, source_urls, source_titles = build_structured_source_fields(nearby_sources)
+                return ResponseData(
+                    text=text,
+                    sources=sources,
+                    source_urls=source_urls,
+                    source_titles=source_titles,
+                )
+            panel_sources = get_reference_panel_source_records(page)
+            if panel_sources:
+                sources, source_urls, source_titles = build_structured_source_fields(panel_sources)
+                return ResponseData(
+                    text=text,
+                    sources=sources,
+                    source_urls=source_urls,
+                    source_titles=source_titles,
+                )
+            sources = format_sources(text, links)
+            if not sources:
+                try:
+                    debug_path = save_source_debug_artifact(
+                        page,
+                        config,
+                        expected_prompt=expected_prompt,
+                        expected_response_text=text,
+                        links=links,
+                    )
+                    print(f"Source debug artifact saved to {debug_path}")
+                except Exception as exc:
+                    print(f"Failed to save source debug artifact: {exc}")
+            return ResponseData(text=text, sources=sources)
     return ResponseData(text="", sources="")
 
 
@@ -824,8 +1223,10 @@ def wait_for_response(
         current_count = get_response_count(page, config.chat.response_selectors)
         current_response = get_last_response_data(
             page,
+            config,
             config.chat.response_selectors,
             expected_prompt=expected_prompt,
+            include_sources=False,
         )
         current_text = current_response.text
         response_arrived = current_count > previous_count or (
@@ -842,7 +1243,13 @@ def wait_for_response(
             if stable_rounds >= config.chat.stability_checks and not is_loading(
                 page, config.chat.loading_selectors
             ):
-                return current_response
+                return get_last_response_data(
+                    page,
+                    config,
+                    config.chat.response_selectors,
+                    expected_prompt=expected_prompt,
+                    include_sources=True,
+                )
 
         time.sleep(config.chat.poll_interval_seconds)
 
@@ -857,7 +1264,12 @@ def send_prompt(page, config: AppConfig, prompt: str) -> ResponseData:
     handle_popup_if_present(page, config)
     _, input_locator = ensure_chat_ready(page, config)
     previous_count = get_response_count(page, config.chat.response_selectors)
-    previous_text = get_last_response_data(page, config.chat.response_selectors).text
+    previous_text = get_last_response_data(
+        page,
+        config,
+        config.chat.response_selectors,
+        include_sources=False,
+    ).text
 
     prepare_input(input_locator, prompt, config.chat.clear_input_hotkey)
     if not click_if_present(page, config.chat.send_button_selectors, config.browser.action_timeout_ms):

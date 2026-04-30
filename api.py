@@ -197,7 +197,18 @@ def write_json_output(output_path: Path, payload: dict[str, Any]) -> Path:
     return output_path
 
 
-def execute_geo_optimize(request: GeoOptimizeRequest) -> dict[str, Any]:
+def build_file_path_payload(excel_path: Path) -> dict[str, str]:
+    json_path = make_json_output_path(excel_path)
+    return {
+        "excel_path": str(excel_path),
+        "json_path": str(json_path),
+    }
+
+
+def execute_geo_optimize(
+    request: GeoOptimizeRequest,
+    output_path: Path | None = None,
+) -> dict[str, Any]:
     config_path = Path(request.config_path).expanduser().resolve()
     if not config_path.exists():
         raise HTTPException(status_code=400, detail=f"Config file not found: {config_path}")
@@ -248,7 +259,7 @@ def execute_geo_optimize(request: GeoOptimizeRequest) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     analysis = parse_analysis(analysis_response.text)
-    output_path = make_output_path(request.output_dir, request.company_name)
+    output_path = output_path or make_output_path(request.output_dir, request.company_name)
     export_prompt_records_to_excel(
         records,
         output_path,
@@ -291,15 +302,16 @@ def set_job_state(job_key: str, **fields: Any) -> None:
         job.update(fields)
 
 
-def run_geo_job(job_id: str, request: GeoOptimizeRequest) -> None:
+def run_geo_job(job_id: str, request: GeoOptimizeRequest, output_path: Path) -> None:
     set_job_state(job_id, status="running", started_at=datetime.now().isoformat())
     try:
-        result = execute_geo_optimize(request)
+        result = execute_geo_optimize(request, output_path=output_path)
         set_job_state(
             job_id,
             status="succeeded",
             finished_at=datetime.now().isoformat(),
             result=result,
+            **build_file_path_payload(Path(result["excel_path"])),
             error=None,
         )
     except HTTPException as exc:
@@ -325,18 +337,26 @@ def run_geo_job(job_id: str, request: GeoOptimizeRequest) -> None:
 def create_geo_job(request: GeoOptimizeRequest) -> dict[str, Any]:
     job_id = uuid.uuid4().hex
     created_at = datetime.now().isoformat()
+    output_path = make_output_path(request.output_dir, request.company_name)
+    file_paths = build_file_path_payload(output_path)
     set_job_state(
         job_id,
         job_id=job_id,
         status="queued",
         created_at=created_at,
         request=request.model_dump(),
+        **file_paths,
         result=None,
         error=None,
     )
-    worker = threading.Thread(target=run_geo_job, args=(job_id, request), daemon=True)
+    worker = threading.Thread(target=run_geo_job, args=(job_id, request, output_path), daemon=True)
     worker.start()
-    return {"job_id": job_id, "status": "queued", "created_at": created_at}
+    return {
+        "job_id": job_id,
+        "status": "queued",
+        "created_at": created_at,
+        **file_paths,
+    }
 
 
 @app.get("/health")
