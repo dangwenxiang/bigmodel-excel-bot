@@ -1213,6 +1213,7 @@ def wait_for_response(
     previous_count: int,
     previous_text: str,
     expected_prompt: str,
+    include_sources: bool = True,
 ) -> str:
     deadline = time.time() + config.chat.response_timeout_seconds
     latest_text = previous_text
@@ -1248,7 +1249,7 @@ def wait_for_response(
                     config,
                     config.chat.response_selectors,
                     expected_prompt=expected_prompt,
-                    include_sources=True,
+                    include_sources=include_sources,
                 )
 
         time.sleep(config.chat.poll_interval_seconds)
@@ -1256,7 +1257,7 @@ def wait_for_response(
     raise TimeoutError(f"Timed out waiting for {config.chat.platform_name} to finish responding.")
 
 
-def send_prompt(page, config: AppConfig, prompt: str) -> ResponseData:
+def send_prompt(page, config: AppConfig, prompt: str, include_sources: bool = True) -> ResponseData:
     if config.chat.new_chat_each_prompt:
         click_if_present(page, config.chat.new_chat_selectors, config.browser.action_timeout_ms)
         time.sleep(1)
@@ -1276,7 +1277,7 @@ def send_prompt(page, config: AppConfig, prompt: str) -> ResponseData:
         input_locator.press(config.chat.send_hotkey)
 
     handle_popup_if_present(page, config)
-    return wait_for_response(page, config, previous_count, previous_text, prompt)
+    return wait_for_response(page, config, previous_count, previous_text, prompt, include_sources=include_sources)
 
 
 @contextmanager
@@ -1318,7 +1319,7 @@ def open_chat_page(config: AppConfig, interactive_login: bool = True):
         try:
             yield context, page
         finally:
-            context.close()
+            pass
 
 
 def run_prompt_batch(
