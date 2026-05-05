@@ -6,7 +6,7 @@ import re
 import threading
 import traceback
 import uuid
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import datetime
 from html import escape
 from pathlib import Path
@@ -38,8 +38,17 @@ DEFAULT_GEO_PLATFORM_CONFIGS: dict[str, str] = {
     "deepseek": "config.deepseek.json",
     "yuanbao": "config.yuanbao.json",
     "kimi": "config.kimi.json",
+    "wenxin": "config.wenxin.json",
 }
-DEFAULT_GEO_TEST_PLATFORMS = ["doubao", "qwen", "deepseek", "yuanbao", "kimi"]
+DEFAULT_GEO_TEST_PLATFORMS = ["doubao", "qwen", "deepseek", "yuanbao", "kimi", "wenxin"]
+PLATFORM_DISPLAY_NAMES = {
+    "doubao": "豆包",
+    "qwen": "通义千问",
+    "deepseek": "深度求索",
+    "yuanbao": "腾讯元宝",
+    "kimi": "月之暗面",
+    "wenxin": "文心一言",
+}
 _JOB_LOCK = threading.Lock()
 _GEO_RUN_LOCK = threading.Lock()
 _JOB_STORE: dict[str, dict[str, Any]] = {}
@@ -88,6 +97,76 @@ def parse_json_payload(text: str) -> Any:
     raise ValueError("Model output is not valid JSON.")
 
 
+def repair_json_string_literals(text: str) -> str:
+    result: list[str] = []
+    in_string = False
+    escaped = False
+    index = 0
+    length = len(text)
+
+    while index < length:
+        char = text[index]
+        if not in_string:
+            result.append(char)
+            if char == '"':
+                in_string = True
+                escaped = False
+            index += 1
+            continue
+
+        if escaped:
+            result.append(char)
+            escaped = False
+            index += 1
+            continue
+        if char == "\\":
+            result.append(char)
+            escaped = True
+            index += 1
+            continue
+        if char == '"':
+            cursor = index + 1
+            while cursor < length and text[cursor].isspace():
+                cursor += 1
+            if cursor >= length or text[cursor] in ",:]}\n\r":
+                result.append(char)
+                in_string = False
+            else:
+                result.append('\\"')
+            index += 1
+            continue
+
+        result.append(char)
+        index += 1
+
+    return "".join(result)
+
+
+def normalize_model_json_text(text: str) -> str:
+    normalized = text.strip()
+    normalized = re.sub(
+        U("\\u6539\\u5199\\u6d4b\\u8bd5\\u95ee\\u9898\\uff1a") + r'\["\s*([^"\]]+?)\s*",\s*"\s*([^"\]]+?)\s*"\]',
+        lambda match: U("\\u6539\\u5199\\u6d4b\\u8bd5\\u95ee\\u9898\\uff1a") + f"[{match.group(1).strip()}；{match.group(2).strip()}]",
+        normalized,
+    )
+    return normalized
+
+
+def parse_json_payload_with_repair(text: str) -> Any:
+    try:
+        return parse_json_payload(text)
+    except ValueError:
+        repaired = repair_json_string_literals(normalize_model_json_text(text))
+        try:
+            return parse_json_payload(repaired)
+        except ValueError:
+            start = repaired.find("{")
+            end = repaired.rfind("}")
+            if start >= 0 and end > start:
+                return json.loads(repaired[start : end + 1])
+            raise
+
+
 def parse_rewrites(text: str, rewrite_count: int) -> list[str]:
     try:
         payload = parse_json_payload(text)
@@ -118,21 +197,6 @@ def parse_rewrites(text: str, rewrite_count: int) -> list[str]:
     return deduped[:rewrite_count]
 
 
-def parse_analysis(text: str) -> dict[str, Any]:
-    try:
-        payload = parse_json_payload(text)
-        if isinstance(payload, dict):
-            return payload
-    except ValueError:
-        pass
-    return {
-        "report_title": "GEO 品牌 AI 审计报告",
-        "analysis_conclusion": text.strip(),
-        "final_ranking": [],
-        "optimization_suggestions": [],
-    }
-
-
 def build_rewrite_prompt(user_test_query: str, rewrite_count: int, company_name: str) -> str:
     return f"""
 你现在在做生成式引擎优化测试。
@@ -149,67 +213,6 @@ def build_rewrite_prompt(user_test_query: str, rewrite_count: int, company_name:
 4. 不要解释
 5. 只输出 JSON 数组
 """.strip()
-
-
-def build_analysis_prompt(
-    company_name: str,
-    test_environment: str,
-    user_test_query: str,
-    rewritten_queries: list[str],
-    records: list[PromptRunRecord],
-    citation_counts: list[dict[str, Any]],
-) -> str:
-    result_summaries = [
-        {
-            "query": record.query,
-            "result_excerpt": record.result[:800],
-            "sources": [item for item in record.sources.splitlines() if item.strip()],
-            "source_urls": [item for item in record.source_urls.splitlines() if item.strip()],
-            "source_titles": [item for item in record.source_titles.splitlines() if item.strip()],
-        }
-        for record in records
-    ]
-    return (
-        "你是一名 GEO 品牌 AI 审计分析师。请基于以下多轮测试数据，输出《GEO 品牌 AI 审计报告》。\n"
-        "报告必须围绕“可见、权重、信源、对比”四个维度展开，并给出可执行的 GEO 优化建议。\n\n"
-        f"测试环境名：{test_environment}\n"
-        f"目标公司：{company_name}\n"
-        f"原始测试话术：{user_test_query}\n"
-        f"改写测试话术：{json.dumps(rewritten_queries, ensure_ascii=False)}\n"
-        f"测试结果：{json.dumps(result_summaries, ensure_ascii=False)}\n"
-        f"参考资料引用次数：{json.dumps(citation_counts, ensure_ascii=False)}\n\n"
-        "请只输出 JSON 对象，字段必须包含：\n"
-        "{\n"
-        '  "report_title": "GEO 品牌 AI 审计报告",\n'
-        '  "test_environment": "geo",\n'
-        '  "analysis_conclusion": "用一段话概括目标品牌当前 AI 可见度、推荐权重、信源可信度和竞品差距",\n'
-        '  "audit_dimensions": {\n'
-        '    "visibility_recall": {"dimension": "可见", "title": "基础可见度与唤醒率", "audit_points": "AI 是否能准确识别并描述目标品牌", "key_metrics": {"recall_rate": "N/总测试次数", "successful_recalls": 0, "total_tests": 0}, "findings": "现状判断", "risk_level": "高/中/低"},\n'
-        '    "sov_first_mention": {"dimension": "权重", "title": "第一提及率与推荐占有率", "audit_points": "行业通用词下品牌在 AI 推荐列表中的排位和占有率", "key_metrics": {"first_mention_rate": "百分比", "sov": "百分比", "average_rank": "平均排名或未上榜"}, "findings": "现状判断", "risk_level": "高/中/低"},\n'
-        '    "semantic_sentiment": {"dimension": "权重", "title": "语义对齐与情感偏向", "audit_points": "AI 输出关键词是否与品牌预设核心优势对齐，评价是否正向清晰", "key_metrics": {"semantic_tag_match": "高/中/低", "sentiment": "正向/中立/负向/模糊", "matched_tags": [], "missing_tags": []}, "findings": "现状判断", "risk_level": "高/中/低"},\n'
-        '    "source_authority": {"dimension": "信源", "title": "信源质量与引用网格", "audit_points": "AI 主要引用官网、备案站点、权威媒体还是杂乱第三方平台", "key_metrics": {"authoritative_source_ratio": "百分比", "source_grid_health": "强/中/弱", "hallucination_risk": "高/中/低"}, "findings": "现状判断", "risk_level": "高/中/低"},\n'
-        '    "competitor_benchmarking": {"dimension": "对比", "title": "竞品对比差异化", "audit_points": "竞品在同等语境下的 AI 推荐权重、语义簇覆盖和差异化优势", "key_metrics": {"leading_coefficient": "领先/持平/落后", "competitor_advantages": [], "untouched_semantic_clusters": []}, "findings": "现状判断", "risk_level": "高/中/低"}\n'
-        '  },\n'
-        '  "final_ranking": [{"rank": 1, "company": "公司名", "reason": "上榜原因", "mention_type": "第一提及/推荐提及/未提及"}],\n'
-        '  "optimized_company_assessment": "目标公司当前数字化主权、AI 推荐权重和 GEO 基础设施判断",\n'
-        '  "corpus_gap_scan": {"information_gaps": ["信息断层1"], "source_islands": ["信源孤岛1"], "hallucination_or_misreadings": ["误读或幻觉1"]},\n'
-        '  "atomic_corpus_rebuild_suggestions": ["把散乱品牌介绍改造为 AI 易抓取的知识碎片建议1"],\n'
-        '  "digital_sovereignty_assessment": {"official_source_status": "是否具备官网/备案/结构化数据", "icp_and_structured_data_risk": "高/中/低", "high_risk_items": []},\n'
-        '  "visualization_summary": {"ai_gravity_score": 0, "radar_dimensions": {"visibility": 0, "recommendation_weight": 0, "authority": 0, "differentiation": 0}, "before_after_projection": {"current_first_mention_rate": "百分比", "expected_first_mention_rate_after_optimization": "百分比", "current_authority": "现状", "expected_authority_after_optimization": "预期"}},\n'
-        '  "service_package_mapping": [{"detected_issue": "问题", "recommended_service": "对应服务套餐或动作", "reason": "推荐理由"}],\n'
-        '  "optimization_suggestions": ["建议1", "建议2", "建议3"]\n'
-        "}\n"
-        "要求：\n"
-        "1. 必须从“可见、权重、信源、对比”四个维度展开，不能只给泛泛结论\n"
-        "2. 唤醒率按目标品牌在测试回答中被准确识别/描述的次数计算，无法精确时给出估算并说明依据\n"
-        "3. SOV、第一提及率、平均排名要结合所有测试结果给出，不确定时说明样本限制\n"
-        "4. 信源分析要区分官网/备案站点/权威媒体/第三方平台/无来源，并指出幻觉或误读风险\n"
-        "5. 竞品对比要指出竞品占据的语义簇，以及目标品牌尚未触达的语义簇\n"
-        "6. 原子化重构建议要具体到可生产的语料类型，例如官网 FAQ、业务卡片、案例页、口碑问答、对比页\n"
-        "7. 结论部分要把发现的问题映射到后续服务动作，例如官网备案、GEO 结构化数据、权威信源铺设、语料重构\n"
-        "8. 不要输出 JSON 以外的内容"
-    )
-
 
 
 def resolve_platform_config_paths(request: GeoOptimizeRequest) -> list[tuple[str, Path]]:
@@ -289,232 +292,56 @@ def write_json_output(output_path: Path, payload: dict[str, Any]) -> Path:
     return output_path
 
 
-def format_html_value(value: Any) -> str:
-    if value is None or value == "":
-        return "<span class=\"muted\">暂无</span>"
-    if isinstance(value, (dict, list)):
-        return f"<pre>{escape(json.dumps(value, ensure_ascii=False, indent=2))}</pre>"
-    return escape(str(value)).replace("\n", "<br>")
+def make_job_log_path(output_path: Path, job_id: str | None = None) -> Path:
+    logs_dir = output_path.parent / "logs"
+    suffix = f"-{job_id[:8]}" if job_id else ""
+    return logs_dir / f"{output_path.stem}{suffix}.log.jsonl"
 
 
-def render_metric_cards(analysis: dict[str, Any]) -> str:
-    visualization = analysis.get("visualization_summary") if isinstance(analysis, dict) else {}
-    radar = visualization.get("radar_dimensions", {}) if isinstance(visualization, dict) else {}
-    cards = [
-        ("AI 引力值", visualization.get("ai_gravity_score", "暂无") if isinstance(visualization, dict) else "暂无"),
-        ("可见", radar.get("visibility", "暂无") if isinstance(radar, dict) else "暂无"),
-        ("推荐权重", radar.get("recommendation_weight", "暂无") if isinstance(radar, dict) else "暂无"),
-        ("权威度", radar.get("authority", "暂无") if isinstance(radar, dict) else "暂无"),
-        ("差异化", radar.get("differentiation", "暂无") if isinstance(radar, dict) else "暂无"),
-    ]
-    return "".join(
-        f"<div class=\"metric-card\"><div class=\"metric-label\">{escape(label)}</div>"
-        f"<div class=\"metric-value\">{escape(str(value))}</div></div>"
-        for label, value in cards
-    )
+def make_job_text_log_path(log_path: Path) -> Path:
+    return log_path.with_suffix(".txt")
 
 
-def render_audit_dimensions(analysis: dict[str, Any]) -> str:
-    dimensions = analysis.get("audit_dimensions", {}) if isinstance(analysis, dict) else {}
-    if not isinstance(dimensions, dict) or not dimensions:
-        return "<p class=\"muted\">暂无审计维度数据</p>"
-    blocks: list[str] = []
-    for key, item in dimensions.items():
-        if not isinstance(item, dict):
-            continue
-        title = item.get("title") or key
-        dimension = item.get("dimension") or ""
-        risk_level = item.get("risk_level") or "暂无"
-        blocks.append(
-            "<article class=\"dimension-card\">"
-            f"<div class=\"dimension-head\"><h3>{escape(str(title))}</h3>"
-            f"<span class=\"tag\">{escape(str(dimension))}</span>"
-            f"<span class=\"risk\">风险：{escape(str(risk_level))}</span></div>"
-            f"<p><strong>审计要点：</strong>{format_html_value(item.get('audit_points'))}</p>"
-            f"<p><strong>关键指标：</strong>{format_html_value(item.get('key_metrics'))}</p>"
-            f"<p><strong>发现：</strong>{format_html_value(item.get('findings'))}</p>"
-            "</article>"
-        )
-    return "".join(blocks) or "<p class=\"muted\">暂无审计维度数据</p>"
+def append_job_log(log_path: Path | None, event: str, **fields: Any) -> None:
+    if log_path is None:
+        return
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "ts": datetime.now().isoformat(timespec="seconds"),
+        "event": event,
+        **fields,
+    }
+    with log_path.open("a", encoding="utf-8") as file:
+        file.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
 
 
-def render_ranking_rows(ranking: Any) -> str:
-    if not isinstance(ranking, list) or not ranking:
-        return "<tr><td colspan=\"4\" class=\"muted\">暂无排名数据</td></tr>"
-    rows: list[str] = []
-    for item in ranking:
-        if not isinstance(item, dict):
-            continue
-        rows.append(
-            "<tr>"
-            f"<td>{format_html_value(item.get('rank'))}</td>"
-            f"<td>{format_html_value(item.get('company'))}</td>"
-            f"<td>{format_html_value(item.get('mention_type'))}</td>"
-            f"<td>{format_html_value(item.get('reason'))}</td>"
-            "</tr>"
-        )
-    return "".join(rows) or "<tr><td colspan=\"4\" class=\"muted\">暂无排名数据</td></tr>"
+def append_job_text_log(log_path: Path | None, message: str) -> None:
+    if log_path is None:
+        return
+    text_log_path = make_job_text_log_path(log_path)
+    text_log_path.parent.mkdir(parents=True, exist_ok=True)
+    with text_log_path.open("a", encoding="utf-8") as file:
+        file.write(f"[{datetime.now().isoformat(timespec='seconds')}] {message}\n")
 
 
-def render_excel_rows(rows: Any) -> str:
-    if not isinstance(rows, list) or not rows:
-        return "<tr><td colspan=\"5\" class=\"muted\">暂无测试明细</td></tr>"
-    rendered: list[str] = []
-    for index, row in enumerate(rows, start=1):
-        if not isinstance(row, dict):
-            continue
-        rendered.append(
-            "<tr>"
-            f"<td>{index}</td>"
-            f"<td>{format_html_value(row.get('query'))}</td>"
-            f"<td>{format_html_value(row.get('result'))}</td>"
-            f"<td>{format_html_value(row.get('source_titles') or row.get('sources'))}</td>"
-            f"<td>{format_html_value(row.get('source_urls'))}</td>"
-            "</tr>"
-        )
-    return "".join(rendered) or "<tr><td colspan=\"5\" class=\"muted\">暂无测试明细</td></tr>"
-
-
-def build_html_report(payload: dict[str, Any]) -> str:
-    analysis = payload.get("analysis", {}) if isinstance(payload.get("analysis"), dict) else {}
-    title = str(analysis.get("report_title") or "GEO 品牌 AI 审计报告")
-    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    return f"""<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{escape(title)}</title>
-  <style>
-    :root {{ color-scheme: light; --bg:#f6f8fb; --card:#fff; --text:#1f2937; --muted:#6b7280; --line:#e5e7eb; --brand:#1d4ed8; --soft:#eff6ff; }}
-    * {{ box-sizing: border-box; }}
-    body {{ margin:0; background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",Arial,sans-serif; line-height:1.65; }}
-    .page {{ max-width:1180px; margin:0 auto; padding:32px 20px 56px; }}
-    .hero {{ background:linear-gradient(135deg,#1d4ed8,#0f766e); color:#fff; border-radius:24px; padding:32px; box-shadow:0 18px 45px rgba(15,23,42,.16); }}
-    .hero h1 {{ margin:0 0 12px; font-size:34px; letter-spacing:.02em; }}
-    .hero p {{ margin:6px 0; opacity:.95; }}
-    .section {{ margin-top:22px; background:var(--card); border:1px solid var(--line); border-radius:18px; padding:24px; box-shadow:0 8px 24px rgba(15,23,42,.05); }}
-    .section h2 {{ margin:0 0 16px; font-size:22px; }}
-    .metrics {{ display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:14px; margin-top:18px; }}
-    .metric-card {{ background:rgba(255,255,255,.15); border:1px solid rgba(255,255,255,.28); border-radius:16px; padding:16px; }}
-    .metric-label {{ font-size:13px; opacity:.85; }}
-    .metric-value {{ font-size:26px; font-weight:700; margin-top:4px; }}
-    .dimension-grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }}
-    .dimension-card {{ border:1px solid var(--line); border-radius:16px; padding:18px; background:#fff; }}
-    .dimension-head {{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:8px; }}
-    .dimension-head h3 {{ margin:0; font-size:18px; }}
-    .tag,.risk {{ display:inline-flex; align-items:center; border-radius:999px; padding:3px 10px; font-size:12px; background:var(--soft); color:var(--brand); }}
-    .risk {{ color:#b45309; background:#fffbeb; }}
-    table {{ width:100%; border-collapse:collapse; table-layout:fixed; }}
-    th,td {{ border:1px solid var(--line); padding:10px 12px; vertical-align:top; word-break:break-word; }}
-    th {{ background:#f9fafb; text-align:left; }}
-    pre {{ white-space:pre-wrap; word-break:break-word; margin:0; padding:12px; background:#f9fafb; border-radius:10px; border:1px solid var(--line); }}
-    .muted {{ color:var(--muted); }}
-    .two-col {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }}
-    .info {{ background:#f9fafb; border:1px solid var(--line); border-radius:14px; padding:14px; }}
-    @media (max-width: 900px) {{ .metrics,.dimension-grid,.two-col {{ grid-template-columns:1fr; }} .hero h1 {{ font-size:28px; }} }}
-  </style>
-</head>
-<body>
-  <main class="page">
-    <header class="hero">
-      <h1>{escape(title)}</h1>
-      <p>品牌：{format_html_value(payload.get("company_name"))}</p>
-      <p>测试环境：{format_html_value(payload.get("test_environment"))} ｜ 生成时间：{escape(generated_at)}</p>
-      <div class="metrics">{render_metric_cards(analysis)}</div>
-    </header>
-
-    <section class="section">
-      <h2>审计结论</h2>
-      <p>{format_html_value(analysis.get("analysis_conclusion"))}</p>
-      <div class="two-col">
-        <div class="info"><strong>原始测试话术</strong><br>{format_html_value(payload.get("user_test_query"))}</div>
-        <div class="info"><strong>改写测试话术</strong><br>{format_html_value(payload.get("rewritten_queries"))}</div>
-      </div>
-    </section>
-
-    <section class="section">
-      <h2>核心审计维度</h2>
-      <div class="dimension-grid">{render_audit_dimensions(analysis)}</div>
-    </section>
-
-    <section class="section">
-      <h2>推荐排名与竞品表现</h2>
-      <table><thead><tr><th style="width:80px">排名</th><th>品牌</th><th>提及类型</th><th>原因</th></tr></thead><tbody>{render_ranking_rows(analysis.get("final_ranking"))}</tbody></table>
-    </section>
-
-    <section class="section">
-      <h2>语料漏洞与数字化主权</h2>
-      <div class="two-col">
-        <div class="info"><strong>语料漏洞扫描</strong><br>{format_html_value(analysis.get("corpus_gap_scan"))}</div>
-        <div class="info"><strong>数字化主权评估</strong><br>{format_html_value(analysis.get("digital_sovereignty_assessment"))}</div>
-      </div>
-    </section>
-
-    <section class="section">
-      <h2>优化建议</h2>
-      <div class="two-col">
-        <div class="info"><strong>原子化语料重构</strong><br>{format_html_value(analysis.get("atomic_corpus_rebuild_suggestions"))}</div>
-        <div class="info"><strong>服务套餐映射</strong><br>{format_html_value(analysis.get("service_package_mapping"))}</div>
-      </div>
-      <div class="info" style="margin-top:16px"><strong>综合优化动作</strong><br>{format_html_value(analysis.get("optimization_suggestions"))}</div>
-    </section>
-
-    <section class="section">
-      <h2>测试明细</h2>
-      <table><thead><tr><th style="width:60px">#</th><th>测试问题</th><th>AI 回答</th><th>信源标题</th><th>信源链接</th></tr></thead><tbody>{render_excel_rows(payload.get("excel_rows"))}</tbody></table>
-    </section>
-  </main>
-</body>
-</html>
-"""
-
-
-def write_html_output(output_path: Path, payload: dict[str, Any]) -> Path:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(build_html_report(payload), encoding="utf-8")
-    return output_path
-
-
-def write_pdf_output(html_path: Path, pdf_path: Path) -> Path:
-    pdf_path.parent.mkdir(parents=True, exist_ok=True)
-    with sync_playwright() as playwright:
-        launch_errors: list[Exception] = []
-        browser = None
-        try:
-            browser = playwright.chromium.launch(channel="chrome", headless=True)
-        except PlaywrightError as exc:
-            launch_errors.append(exc)
-            browser = playwright.chromium.launch(headless=True)
-
-        try:
-            page = browser.new_page()
-            page.goto(html_path.resolve().as_uri(), wait_until="networkidle")
-            page.pdf(
-                path=str(pdf_path),
-                format="A4",
-                print_background=True,
-                margin={
-                    "top": "16mm",
-                    "right": "12mm",
-                    "bottom": "16mm",
-                    "left": "12mm",
-                },
-            )
-        finally:
-            browser.close()
-    return pdf_path
+def log_job_event(log_path: Path | None, event: str, **fields: Any) -> None:
+    append_job_log(log_path, event, **fields)
+    details = " ".join(f"{key}={value}" for key, value in fields.items() if value not in (None, ""))
+    append_job_text_log(log_path, f"{event}" + (f" {details}" if details else ""))
 
 
 def build_file_path_payload(excel_path: Path) -> dict[str, str]:
     json_path = make_json_output_path(excel_path)
     html_path = make_html_output_path(excel_path)
     pdf_path = make_pdf_output_path(excel_path)
+    log_path = make_job_log_path(excel_path)
     return {
         "excel_path": str(excel_path),
         "json_path": str(json_path),
         "html_path": str(html_path),
         "pdf_path": str(pdf_path),
+        "log_path": str(log_path),
+        "text_log_path": str(make_job_text_log_path(log_path)),
     }
 
 
@@ -522,8 +349,10 @@ def execute_geo_optimize(
     request: GeoOptimizeRequest,
     output_path: Path | None = None,
     stage_callback: Any | None = None,
+    log_path: Path | None = None,
 ) -> dict[str, Any]:
     def set_stage(stage: str) -> None:
+        log_job_event(log_path, "stage", stage=stage)
         if stage_callback:
             stage_callback(stage)
 
@@ -535,6 +364,15 @@ def execute_geo_optimize(
     platform_config_paths = resolve_platform_config_paths(request)
     platform_names = [platform for platform, _ in platform_config_paths]
     test_environment = make_platform_test_environment(request.test_environment, platform_names)
+    log_job_event(
+        log_path,
+        "execute_start",
+        company_name=request.company_name,
+        rewrite_count=request.rewrite_count,
+        config_path=str(config_path),
+        output_path=str(output_path) if output_path else "",
+        platforms=platform_names,
+    )
 
     try:
         set_stage("opening_browser_for_rewrite")
@@ -550,19 +388,49 @@ def execute_geo_optimize(
                 ),
             )
             rewritten_queries = parse_rewrites(rewrite_response.text, request.rewrite_count)
+            log_job_event(log_path, "rewrite_done", rewritten_count=len(rewritten_queries), rewritten_queries=rewritten_queries)
 
         records: list[PromptRunRecord] = []
         for platform_index, (platform, platform_config_path) in enumerate(platform_config_paths, start=1):
             platform_config = load_config(platform_config_path)
             set_stage(f"opening_{platform}_{platform_index}_of_{len(platform_config_paths)}")
+            log_job_event(
+                log_path,
+                "platform_opening",
+                platform=platform,
+                platform_name=platform_display_name(platform),
+                platform_index=platform_index,
+                platform_count=len(platform_config_paths),
+                config_path=str(platform_config_path),
+            )
             with open_chat_page(platform_config, interactive_login=False) as (_, page):
                 for query_index, query in enumerate(rewritten_queries, start=1):
                     set_stage(
                         f"testing_{platform}_query_{query_index}_of_{len(rewritten_queries)}"
                     )
+                    log_job_event(
+                        log_path,
+                        "query_start",
+                        platform=platform,
+                        platform_name=platform_display_name(platform),
+                        query_index=query_index,
+                        query_count=len(rewritten_queries),
+                        query=query,
+                    )
                     print(f"Running {platform} query {query_index}/{len(rewritten_queries)}", flush=True)
                     response = send_prompt(page, platform_config, query)
                     print(f"Finished {platform} query {query_index}/{len(rewritten_queries)}", flush=True)
+                    log_job_event(
+                        log_path,
+                        "query_done",
+                        platform=platform,
+                        platform_name=platform_display_name(platform),
+                        query_index=query_index,
+                        query_count=len(rewritten_queries),
+                        result_length=len(response.text or ""),
+                        source_count=len([item for item in response.sources.splitlines() if item.strip()]),
+                        source_url_count=len([item for item in response.source_urls.splitlines() if item.strip()]),
+                    )
                     records.append(
                         PromptRunRecord(
                             query=query,
@@ -575,6 +443,7 @@ def execute_geo_optimize(
                     )
 
         citation_counts = build_reference_citation_counts(records)
+        log_job_event(log_path, "platform_tests_done", record_count=len(records), citation_count=len(citation_counts))
         set_stage("building_final_audit_report")
         with open_chat_page(config, interactive_login=False) as (_, page):
             analysis_response = send_prompt(
@@ -590,13 +459,18 @@ def execute_geo_optimize(
                 ),
                 include_sources=False,
             )
+        log_job_event(log_path, "analysis_response_done", response_length=len(analysis_response.text or ""))
     except HTTPException:
+        log_job_event(log_path, "execute_http_exception", traceback=traceback.format_exc())
         raise
     except Exception as exc:
+        log_job_event(log_path, "execute_exception", error=str(exc), traceback=traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     analysis = parse_analysis(analysis_response.text)
+    inject_platform_result_overview(analysis, records, request.company_name)
     pending_fields = collect_pending_report_fields(analysis)
+    log_job_event(log_path, "analysis_parsed", pending_field_count=len(pending_fields))
     if pending_fields:
         set_stage(f"filling_audit_report_gaps_{len(pending_fields)}")
         try:
@@ -616,8 +490,11 @@ def execute_geo_optimize(
                     include_sources=False,
                 )
             merge_gap_fill_response(analysis, gap_fill_response.text)
+            inject_platform_result_overview(analysis, records, request.company_name)
+            log_job_event(log_path, "gap_fill_done", response_length=len(gap_fill_response.text or ""))
         except Exception as exc:
             print(f"Audit gap fill skipped: {exc}")
+            log_job_event(log_path, "gap_fill_skipped", error=str(exc), traceback=traceback.format_exc())
 
     output_path = output_path or make_output_path(request.output_dir, request.company_name)
     set_stage("writing_output_files")
@@ -664,9 +541,13 @@ def execute_geo_optimize(
     result["html_path"] = str(html_output_path)
     result["pdf_path"] = str(pdf_output_path)
     write_json_output(json_output_path, result)
+    log_job_event(log_path, "json_written", path=str(json_output_path), exists=json_output_path.exists(), size=json_output_path.stat().st_size if json_output_path.exists() else 0)
     write_html_output(html_output_path, result)
+    log_job_event(log_path, "html_written", path=str(html_output_path), exists=html_output_path.exists(), size=html_output_path.stat().st_size if html_output_path.exists() else 0)
     set_stage("writing_pdf_file")
     write_pdf_output(html_output_path, pdf_output_path)
+    log_job_event(log_path, "pdf_written", path=str(pdf_output_path), exists=pdf_output_path.exists(), size=pdf_output_path.stat().st_size if pdf_output_path.exists() else 0)
+    log_job_event(log_path, "execute_done", excel_path=str(output_path), json_path=str(json_output_path), html_path=str(html_output_path), pdf_path=str(pdf_output_path))
     return result
 
 
@@ -677,15 +558,26 @@ def set_job_state(job_key: str, **fields: Any) -> None:
 
 
 def run_geo_job(job_id: str, request: GeoOptimizeRequest, output_path: Path) -> None:
-    set_job_state(job_id, status="running", started_at=datetime.now().isoformat())
+    log_path = make_job_log_path(output_path, job_id)
+    set_job_state(
+        job_id,
+        status="running",
+        started_at=datetime.now().isoformat(),
+        log_path=str(log_path),
+        text_log_path=str(make_job_text_log_path(log_path)),
+    )
+    log_job_event(log_path, "job_started", job_id=job_id, output_path=str(output_path))
     try:
         set_job_state(job_id, stage="waiting_for_browser_slot")
+        log_job_event(log_path, "stage", stage="waiting_for_browser_slot")
         with _GEO_RUN_LOCK:
             set_job_state(job_id, stage="running_browser_test")
+            log_job_event(log_path, "stage", stage="running_browser_test")
             result = execute_geo_optimize(
                 request,
                 output_path=output_path,
                 stage_callback=lambda stage: set_job_state(job_id, stage=stage),
+                log_path=log_path,
             )
         set_job_state(
             job_id,
@@ -696,7 +588,9 @@ def run_geo_job(job_id: str, request: GeoOptimizeRequest, output_path: Path) -> 
             **build_file_path_payload(Path(result["excel_path"])),
             error=None,
         )
+        log_job_event(log_path, "job_succeeded", job_id=job_id)
     except HTTPException as exc:
+        log_job_event(log_path, "job_failed", job_id=job_id, status_code=exc.status_code, detail=exc.detail)
         set_job_state(
             job_id,
             status="failed",
@@ -705,6 +599,7 @@ def run_geo_job(job_id: str, request: GeoOptimizeRequest, output_path: Path) -> 
             error={"status_code": exc.status_code, "detail": exc.detail},
         )
     except Exception as exc:
+        log_job_event(log_path, "job_failed", job_id=job_id, error=str(exc), traceback=traceback.format_exc())
         set_job_state(
             job_id,
             status="failed",
@@ -723,6 +618,10 @@ def create_geo_job(request: GeoOptimizeRequest) -> dict[str, Any]:
     created_at = datetime.now().isoformat()
     output_path = make_output_path(request.output_dir, request.company_name)
     file_paths = build_file_path_payload(output_path)
+    log_path = make_job_log_path(output_path, job_id)
+    file_paths["log_path"] = str(log_path)
+    file_paths["text_log_path"] = str(make_job_text_log_path(log_path))
+    log_job_event(log_path, "job_created", job_id=job_id, created_at=created_at, output_path=str(output_path), request=request.model_dump())
     set_job_state(
         job_id,
         job_id=job_id,
@@ -771,6 +670,17 @@ AUDIT_SECTION_SCHEMA: list[dict[str, Any]] = [
     {"key": 'expected_outcomes', "title": U('\\u5341\\u4e8c\\u3001\\u9884\\u671f\\u4f18\\u5316\\u6548\\u679c\\u76ee\\u6807'), "fields": [('day_30_goal', U('30 \\u5929\\u76ee\\u6807')), ('day_60_goal', U('60 \\u5929\\u76ee\\u6807')), ('day_90_goal', U('90 \\u5929\\u76ee\\u6807')), ('data_sources', U('\\u6570\\u636e\\u6765\\u6e90 / \\u5224\\u65ad\\u4f9d\\u636e'))]},
 ]
 
+for _section in AUDIT_SECTION_SCHEMA:
+    if _section["key"] == "ai_platform_mentions":
+        _section["fields"].insert(
+            3,
+            (
+                "platform_result_overview",
+                U("\\u5404\\u5e73\\u53f0\\u6d4b\\u8bd5\\u7ed3\\u679c\\u6982\\u51b5"),
+            ),
+        )
+        break
+
 
 def is_blank_report_value(value: Any) -> bool:
     if value in (None, "", [], {}):
@@ -778,12 +688,95 @@ def is_blank_report_value(value: Any) -> bool:
     if isinstance(value, str):
         stripped = value.strip()
         return not stripped or stripped in {"?", "??", "???", "????", U("\\u5f85\\u6838\\u67e5"), PENDING_TEXT}
+    if isinstance(value, list):
+        return not value or all(is_blank_report_value(item) for item in value)
+    if isinstance(value, dict):
+        return not value or all(is_blank_report_value(item) for item in value.values())
     return False
+
+
+def clip_text(value: str, limit: int = 150) -> str:
+    text = re.sub(r"\s+", " ", value or "").strip()
+    return text if len(text) <= limit else text[:limit].rstrip() + "..."
+
+
+def format_percent(numerator: int, denominator: int) -> str:
+    return "0%" if denominator <= 0 else f"{numerator / denominator * 100:.0f}%"
+
+
+def platform_display_name(platform: str) -> str:
+    return PLATFORM_DISPLAY_NAMES.get(platform, platform or U("\\u9ed8\\u8ba4\\u5e73\\u53f0"))
+
+
+def localize_platform_names(value: str) -> str:
+    text = str(value)
+    for platform, display_name in PLATFORM_DISPLAY_NAMES.items():
+        text = re.sub(rf"(?<![A-Za-z0-9_]){re.escape(platform)}(?![A-Za-z0-9_])", display_name, text)
+    return text
+
+
+def source_overview(record: PromptRunRecord, limit: int = 3) -> list[str]:
+    titles = [item.strip() for item in record.source_titles.splitlines() if item.strip()]
+    urls = [item.strip() for item in record.source_urls.splitlines() if item.strip()]
+    sources = [item.strip() for item in record.sources.splitlines() if item.strip()]
+    items: list[str] = []
+    for index in range(max(len(titles), len(urls), len(sources))):
+        title = titles[index] if index < len(titles) else ""
+        url = urls[index] if index < len(urls) else ""
+        source = sources[index] if index < len(sources) else ""
+        label = title or source or url
+        if not label:
+            continue
+        items.append(f"{clip_text(label, 36)}：{url}" if url and url not in label else clip_text(label, 60))
+        if len(items) >= limit:
+            break
+    return items or [U("\\u672a\\u68c0\\u6d4b\\u5230\\u660e\\u786e\\u5f15\\u7528\\u4fe1\\u6e90")]
+
+
+def build_platform_result_overview(records: list[PromptRunRecord], company_name: str) -> dict[str, Any]:
+    grouped: dict[str, list[PromptRunRecord]] = defaultdict(list)
+    for record in records:
+        grouped[record.platform or U("\\u9ed8\\u8ba4\\u5e73\\u53f0")].append(record)
+
+    overview: dict[str, Any] = {}
+    for platform, platform_records in grouped.items():
+        total_tests = len(platform_records)
+        mention_hits = 0
+        top_three_hits = 0
+        first_hits = 0
+        for record in platform_records:
+            result = record.result or ""
+            if not company_name or company_name not in result:
+                continue
+            mention_hits += 1
+            position = result.find(company_name)
+            prefix = result[:position]
+            competitor_mentions_before = len(re.findall(U("\\u516c\\u53f8|\\u5382|\\u5382\\u5bb6|\\u6709\\u9650\\u516c\\u53f8"), prefix))
+            if competitor_mentions_before == 0:
+                first_hits += 1
+            if competitor_mentions_before < 3:
+                top_three_hits += 1
+
+        overview[platform_display_name(platform)] = {
+            U("\\u63d0\\u53ca\\u767e\\u5206\\u6bd4"): format_percent(mention_hits, total_tests),
+            U("\\u524d\\u4e09\\u767e\\u5206\\u6bd4"): format_percent(top_three_hits, total_tests),
+            U("\\u7b2c\\u4e00\\u767e\\u5206\\u6bd4"): format_percent(first_hits, total_tests),
+        }
+    return overview
+
+
+def inject_platform_result_overview(analysis: dict[str, Any], records: list[PromptRunRecord], company_name: str) -> None:
+    sections = analysis.setdefault("sections", default_report_sections(company_name))
+    ai_section = sections.setdefault("ai_platform_mentions", {})
+    ai_section.pop("platform_result_details", None)
+    ai_section["platform_result_overview"] = build_platform_result_overview(records, company_name)
 
 
 def build_analysis_prompt(company_name: str, test_environment: str, user_test_query: str, rewritten_queries: list[str], records: list[PromptRunRecord], citation_counts: list[dict[str, Any]]) -> str:
     result_summaries = [
         {
+            "platform": platform_display_name(record.platform),
+            "platform": platform_display_name(record.platform),
             "query": record.query,
             "result_excerpt": record.result[:900],
             "sources": [item for item in record.sources.splitlines() if item.strip()][:6],
@@ -848,7 +841,7 @@ def normalize_report_sections(analysis: dict[str, Any], company_name: str = "") 
 
 def parse_analysis(text: str) -> dict[str, Any]:
     try:
-        payload = parse_json_payload(text)
+        payload = parse_json_payload_with_repair(text)
         if isinstance(payload, dict):
             payload["report_title"] = REPORT_TITLE
             payload["analysis_conclusion"] = "" if is_blank_report_value(payload.get("analysis_conclusion")) else str(payload.get("analysis_conclusion"))
@@ -925,7 +918,7 @@ AI {U('\\u5e73\\u53f0\\u6d4b\\u8bd5\\u7ed3\\u679c\\u6458\\u8981')}: {json.dumps(
 
 def merge_gap_fill_response(analysis: dict[str, Any], text: str) -> int:
     try:
-        payload = parse_json_payload(text)
+        payload = parse_json_payload_with_repair(text)
     except ValueError:
         return 0
     if not isinstance(payload, dict):
@@ -962,12 +955,13 @@ def html_text(value: Any) -> str:
         return '<ul class="bullet-list">' + ''.join(f'<li>{html_text(item)}</li>' for item in items) + '</ul>'
     if isinstance(value, dict):
         rows = []
-        for key, item in list(value.items())[:6]:
+        for key, item in list(value.items())[:8]:
             if is_blank_report_value(item):
                 continue
-            rows.append(f'<div class="kv-row"><span>{escape(str(key))}</span><strong>{html_text(item)}</strong></div>')
+            row_class = "kv-row kv-row-block" if isinstance(item, dict) else "kv-row"
+            rows.append(f'<div class="{row_class}"><span>{escape(localize_platform_names(str(key)))}</span><strong>{html_text(item)}</strong></div>')
         return '<div class="kv-list">' + ''.join(rows) + '</div>' if rows else '<span class="empty-value">' + PENDING_TEXT + '</span>'
-    return escape(str(value)).replace("\\n", "<br>")
+    return escape(localize_platform_names(str(value))).replace("\\n", "<br>")
 
 
 def render_report_field(label: str, value: Any, index: int) -> str:
@@ -990,7 +984,7 @@ def render_report_page(section: dict[str, Any], section_data: dict[str, Any], pa
         <div class="page-number">{page_number:02d}<small>/{total_pages:02d}</small></div>
       </header>
       <div class="field-grid">{fields_html}</div>
-      <footer class="page-footer"><span>{REPORT_TITLE}</span><span>AI {U('\\u641c\\u7d22\\u53ef\\u89c1\\u5ea6')} ? {U('\\u4fe1\\u6e90')} ? {U('\\u7ade\\u54c1')} ? {U('\\u8206\\u60c5')} ? {U('\\u6267\\u884c\\u65b9\\u6848')}</span></footer>
+      <footer class="page-footer"><span>{REPORT_TITLE}</span><span>AI {U('\\u641c\\u7d22\\u53ef\\u89c1\\u5ea6')} · {U('\\u4fe1\\u6e90')} · {U('\\u7ade\\u54c1')} · {U('\\u8206\\u60c5')} · {U('\\u6267\\u884c\\u65b9\\u6848')}</span></footer>
     </section>
 """
 
@@ -1032,6 +1026,7 @@ def build_html_report(payload: dict[str, Any]) -> str:
     .bullet-list li {{ margin:0 0 1.2mm; }}
     .kv-list {{ display:grid; gap:1.8mm; }}
     .kv-row {{ display:grid; grid-template-columns:27% 1fr; gap:2mm; padding:1.5mm 0; border-bottom:1px dashed #dbe5f3; }}
+    .kv-row-block {{ grid-template-columns:1fr; gap:1.2mm; padding:2mm; border:1px solid #dbeafe; border-radius:10px; background:#f8fbff; }}
     .kv-row span {{ color:#64748b; font-size:11px; }}
     .kv-row strong {{ color:#243044; font-weight:500; }}
     .empty-value {{ color:#94a3b8; font-style:normal; }}
@@ -1076,7 +1071,18 @@ def health() -> dict[str, str]:
 
 @app.post("/api/geo-optimize")
 def geo_optimize(request: GeoOptimizeRequest) -> dict[str, Any]:
-    return execute_geo_optimize(request)
+    output_path = make_output_path(request.output_dir, request.company_name)
+    log_path = make_job_log_path(output_path)
+    log_job_event(log_path, "sync_request_started", output_path=str(output_path), request=request.model_dump())
+    try:
+        result = execute_geo_optimize(request, output_path=output_path, log_path=log_path)
+        result["log_path"] = str(log_path)
+        result["text_log_path"] = str(make_job_text_log_path(log_path))
+        log_job_event(log_path, "sync_request_succeeded")
+        return result
+    except Exception as exc:
+        log_job_event(log_path, "sync_request_failed", error=str(exc), traceback=traceback.format_exc())
+        raise
 
 
 @app.post("/api/geo-optimize/jobs")
@@ -1091,3 +1097,35 @@ def geo_optimize_job_status(job_id: str) -> dict[str, Any]:
     if not job:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
     return job
+
+
+@app.get("/api/geo-optimize/jobs/{job_id}/logs")
+def geo_optimize_job_logs(job_id: str) -> dict[str, Any]:
+    with _JOB_LOCK:
+        job = _JOB_STORE.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+
+    log_path_value = job.get("log_path")
+    if not log_path_value:
+        return {"job_id": job_id, "entries": [], "text": "", "log_path": None, "text_log_path": None}
+
+    log_path = Path(str(log_path_value))
+    text_log_path = Path(str(job.get("text_log_path") or make_job_text_log_path(log_path)))
+    entries: list[Any] = []
+    if log_path.exists():
+        for line in log_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                entries.append(json.loads(line))
+            except ValueError:
+                entries.append({"raw": line})
+
+    return {
+        "job_id": job_id,
+        "log_path": str(log_path),
+        "text_log_path": str(text_log_path),
+        "entries": entries,
+        "text": text_log_path.read_text(encoding="utf-8") if text_log_path.exists() else "",
+    }

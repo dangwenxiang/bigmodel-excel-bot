@@ -49,6 +49,7 @@ class ChatConfig:
     input_selectors: list[str]
     send_button_selectors: list[str]
     response_selectors: list[str]
+    transient_response_texts: list[str]
     new_chat_selectors: list[str]
     loading_selectors: list[str]
     popup_selectors: list[str]
@@ -173,6 +174,7 @@ def load_config(config_path: Path) -> AppConfig:
         input_selectors=list(chat_raw["input_selectors"]),
         send_button_selectors=list(chat_raw.get("send_button_selectors", [])),
         response_selectors=list(chat_raw["response_selectors"]),
+        transient_response_texts=list(chat_raw.get("transient_response_texts", [])),
         new_chat_selectors=list(chat_raw.get("new_chat_selectors", [])),
         loading_selectors=list(chat_raw.get("loading_selectors", [])),
         popup_selectors=list(chat_raw.get("popup_selectors", ["[role='dialog']", "[aria-modal='true']"])),
@@ -1289,6 +1291,9 @@ def wait_for_response(
             include_sources=False,
         )
         current_text = current_response.text
+        if current_text and current_text.strip() in config.chat.transient_response_texts:
+            time.sleep(config.chat.poll_interval_seconds)
+            continue
         response_arrived = current_count > previous_count or (
             current_text and current_text != previous_text
         )

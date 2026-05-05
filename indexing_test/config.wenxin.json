@@ -1,0 +1,94 @@
+{
+  "excel": {
+    "path": "./data/prompts.xlsx",
+    "sheet": "Sheet1",
+    "header_row": 1,
+    "prompt_column": "prompt",
+    "result_column": "result",
+    "source_column": "sources",
+    "start_row": 2,
+    "skip_completed": true
+  },
+  "browser": {
+    "start_url": "https://yiyan.baidu.com/",
+    "user_data_dir": "./browser-profile-wenxin",
+    "channel": "chrome",
+    "headless": false,
+    "connect_over_cdp": true,
+    "cdp_endpoint": "http://127.0.0.1:9222",
+    "new_page_per_session": true,
+    "startup_wait_ms": 3000,
+    "action_timeout_ms": 15000
+  },
+  "chat": {
+    "platform_name": "wenxin",
+    "input_selectors": [
+      "textarea[placeholder]",
+      "textarea",
+      "[contenteditable='true']",
+      "div[contenteditable='true']"
+    ],
+    "send_button_selectors": [],
+    "response_selectors": [
+      "#answer_text_id",
+      ".custom-html.md-stream-desktop",
+      ".dialog-card-wrapper",
+      "[class*=\"answer\"]"
+    ],
+    "new_chat_selectors": [
+      "text=新建对话",
+      "text=新对话",
+      "text=开启新对话",
+      "button:has-text('新建对话')",
+      "button:has-text('新对话')",
+      "button:has-text('开启新对话')",
+      "button:has-text('New chat')"
+    ],
+    "loading_selectors": [
+      "[aria-busy='true']",
+      "[class*='loading']",
+      "[class*='generating']",
+      "[class*='typing']"
+    ],
+    "popup_selectors": [
+      "[role='dialog']",
+      "[aria-modal='true']",
+      ".semi-modal-wrap",
+      "[class*='modal']"
+    ],
+    "popup_confirm_selectors": [
+      "[role='dialog'] button:has-text('继续')",
+      "[role='dialog'] button:has-text('确定')",
+      "[role='dialog'] button:has-text('确认')",
+      "[role='dialog'] button:has-text('我知道了')",
+      "[role='dialog'] button:has-text('同意')",
+      "[role='dialog'] button:has-text('开始使用')",
+      ".semi-modal-wrap button:has-text('继续')",
+      ".semi-modal-wrap button:has-text('确定')",
+      ".semi-modal-wrap button:has-text('确认')",
+      "[class*='modal'] button:has-text('继续')",
+      "[class*='modal'] button:has-text('确定')",
+      "[class*='modal'] button:has-text('确认')"
+    ],
+    "response_timeout_seconds": 180,
+    "stability_checks": 4,
+    "poll_interval_seconds": 1.0,
+    "send_hotkey": "Enter",
+    "clear_input_hotkey": "Control+A",
+    "new_chat_each_prompt": true,
+    "new_chat_on_session_start": true,
+    "manual_login": true,
+    "manual_popup_confirmation": true,
+    "manual_verification_timeout_seconds": 0,
+    "popup_artifact_dir": "./artifacts/popups/wenxin",
+    "transient_response_texts": [
+      "开始全网搜索..."
+    ]
+  },
+  "rate_limit": {
+    "min_delay_seconds": 8,
+    "max_delay_seconds": 20,
+    "pause_every_n_prompts": 10,
+    "pause_seconds": 120
+  }
+}
