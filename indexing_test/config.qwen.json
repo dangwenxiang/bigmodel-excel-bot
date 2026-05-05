@@ -10,8 +10,8 @@
     "skip_completed": true
   },
   "browser": {
-    "start_url": "https://www.doubao.com/chat/",
-    "user_data_dir": "./browser-profile-doubao",
+    "start_url": "https://www.qianwen.com/",
+    "user_data_dir": "./browser-profile-qwen",
     "channel": "chrome",
     "headless": false,
     "connect_over_cdp": true,
@@ -21,20 +21,28 @@
     "action_timeout_ms": 15000
   },
   "chat": {
-    "platform_name": "doubao",
+    "platform_name": "qwen",
     "input_selectors": [
-      "textarea.semi-input-textarea[placeholder]",
-      "textarea.semi-input-textarea",
-      "textarea"
+      "textarea[placeholder]",
+      "textarea",
+      "[contenteditable='true']",
+      "div[contenteditable='true']"
     ],
     "send_button_selectors": [],
     "response_selectors": [
-      ".flow-markdown-body",
-      "[class~='flow-markdown-body']"
+      ".markdown-body",
+      "[class*='markdown']",
+      "[class*='Markdown']",
+      "[data-message-author-role='assistant']",
+      "[class*='answer']",
+      "[class*='response']"
     ],
     "new_chat_selectors": [
-      "text=新对话",
-      "button:has-text('新对话')"
+      "text=\u65b0\u5efa\u5bf9\u8bdd",
+      "text=\u65b0\u5bf9\u8bdd",
+      "button:has-text('\u65b0\u5efa\u5bf9\u8bdd')",
+      "button:has-text('\u65b0\u5bf9\u8bdd')",
+      "button:has-text('New chat')"
     ],
     "loading_selectors": [
       ".semi-spin-spinning",
@@ -66,7 +74,8 @@
     "new_chat_on_session_start": true,
     "manual_login": true,
     "manual_popup_confirmation": true,
-    "manual_verification_timeout_seconds": 0
+    "manual_verification_timeout_seconds": 0,
+    "popup_artifact_dir": "./artifacts/popups/qwen"
   },
   "rate_limit": {
     "min_delay_seconds": 8,

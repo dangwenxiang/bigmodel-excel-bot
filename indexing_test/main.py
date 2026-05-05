@@ -104,6 +104,7 @@ class PromptRunRecord:
     sources: str
     source_urls: str
     source_titles: str
+    platform: str = ""
 
 
 def parse_args() -> argparse.Namespace:
@@ -1160,70 +1161,73 @@ def get_last_response_data(
         count = locator.count()
         if count == 0:
             continue
-        response = locator.nth(count - 1)
-        try:
-            payload = response.evaluate(
-                """(el) => ({
-                    text: (el.innerText || '').trim(),
-                    links: Array.from(el.querySelectorAll('a[href]')).map((link) => ({
-                        text: (link.innerText || '').trim(),
-                        href: link.href || ''
-                    }))
-                })"""
-            )
-        except PlaywrightError:
-            continue
+        for index in range(count - 1, -1, -1):
+            response = locator.nth(index)
+            try:
+                if not response.is_visible():
+                    continue
+                payload = response.evaluate(
+                    """(el) => ({
+                        text: (el.innerText || '').trim(),
+                        links: Array.from(el.querySelectorAll('a[href]')).map((link) => ({
+                            text: (link.innerText || '').trim(),
+                            href: link.href || ''
+                        }))
+                    })"""
+                )
+            except PlaywrightError:
+                continue
 
-        text = str(payload.get("text") or "").strip()
-        if text:
-            links = payload.get("links") or []
-            if not include_sources:
-                return ResponseData(text=text, sources="")
-            structured_sources = get_structured_source_records(
-                page,
-                expected_prompt=expected_prompt,
-                expected_response_text=text,
-            )
-            if structured_sources:
-                sources, source_urls, source_titles = build_structured_source_fields(structured_sources)
-                return ResponseData(
-                    text=text,
-                    sources=sources,
-                    source_urls=source_urls,
-                    source_titles=source_titles,
+            text = str(payload.get("text") or "").strip()
+            if text:
+                links = payload.get("links") or []
+                if not include_sources:
+                    return ResponseData(text=text, sources="")
+                structured_sources = get_structured_source_records(
+                    page,
+                    expected_prompt=expected_prompt,
+                    expected_response_text=text,
                 )
-            nearby_sources = get_nearby_dom_source_records(page, selectors)
-            if nearby_sources:
-                sources, source_urls, source_titles = build_structured_source_fields(nearby_sources)
-                return ResponseData(
-                    text=text,
-                    sources=sources,
-                    source_urls=source_urls,
-                    source_titles=source_titles,
-                )
-            panel_sources = get_reference_panel_source_records(page)
-            if panel_sources:
-                sources, source_urls, source_titles = build_structured_source_fields(panel_sources)
-                return ResponseData(
-                    text=text,
-                    sources=sources,
-                    source_urls=source_urls,
-                    source_titles=source_titles,
-                )
-            sources = format_sources(text, links)
-            if not sources:
-                try:
-                    debug_path = save_source_debug_artifact(
-                        page,
-                        config,
-                        expected_prompt=expected_prompt,
-                        expected_response_text=text,
-                        links=links,
+                if structured_sources:
+                    sources, source_urls, source_titles = build_structured_source_fields(structured_sources)
+                    return ResponseData(
+                        text=text,
+                        sources=sources,
+                        source_urls=source_urls,
+                        source_titles=source_titles,
                     )
-                    print(f"Source debug artifact saved to {debug_path}")
-                except Exception as exc:
-                    print(f"Failed to save source debug artifact: {exc}")
-            return ResponseData(text=text, sources=sources)
+                nearby_sources = get_nearby_dom_source_records(page, selectors)
+                if nearby_sources:
+                    sources, source_urls, source_titles = build_structured_source_fields(nearby_sources)
+                    return ResponseData(
+                        text=text,
+                        sources=sources,
+                        source_urls=source_urls,
+                        source_titles=source_titles,
+                    )
+                panel_sources = get_reference_panel_source_records(page)
+                if panel_sources:
+                    sources, source_urls, source_titles = build_structured_source_fields(panel_sources)
+                    return ResponseData(
+                        text=text,
+                        sources=sources,
+                        source_urls=source_urls,
+                        source_titles=source_titles,
+                    )
+                sources = format_sources(text, links)
+                if not sources:
+                    try:
+                        debug_path = save_source_debug_artifact(
+                            page,
+                            config,
+                            expected_prompt=expected_prompt,
+                            expected_response_text=text,
+                            links=links,
+                        )
+                        print(f"Source debug artifact saved to {debug_path}")
+                    except Exception as exc:
+                        print(f"Failed to save source debug artifact: {exc}")
+                return ResponseData(text=text, sources=sources)
     return ResponseData(text="", sources="")
 
 
@@ -1312,10 +1316,27 @@ def wait_for_response(
     raise TimeoutError(f"Timed out waiting for {config.chat.platform_name} to finish responding.")
 
 
+def start_new_chat_if_needed(page, config: AppConfig) -> None:
+    if click_if_present(page, config.chat.new_chat_selectors, config.browser.action_timeout_ms):
+        page.wait_for_timeout(1200)
+        return
+
+    current_url = page.url
+    try:
+        page.goto(config.browser.start_url, wait_until="domcontentloaded")
+        page.wait_for_timeout(config.browser.startup_wait_ms)
+        click_if_present(page, config.chat.new_chat_selectors, config.browser.action_timeout_ms)
+        page.wait_for_timeout(1200)
+    except PlaywrightError:
+        try:
+            page.goto(current_url, wait_until="domcontentloaded")
+        except PlaywrightError:
+            pass
+
+
 def send_prompt(page, config: AppConfig, prompt: str, include_sources: bool = True) -> ResponseData:
     if config.chat.new_chat_each_prompt:
-        click_if_present(page, config.chat.new_chat_selectors, config.browser.action_timeout_ms)
-        time.sleep(1)
+        start_new_chat_if_needed(page, config)
 
     handle_popup_if_present(page, config)
     _, input_locator = ensure_chat_ready_or_wait_for_manual_verification(page, config)
@@ -1407,8 +1428,7 @@ def open_chat_page(config: AppConfig, interactive_login: bool = True):
 
         handle_popup_if_present(page, config)
         if config.chat.new_chat_on_session_start:
-            click_if_present(page, config.chat.new_chat_selectors, config.browser.action_timeout_ms)
-            page.wait_for_timeout(1000)
+            start_new_chat_if_needed(page, config)
         try:
             yield context, page
         finally:
@@ -1450,12 +1470,13 @@ def export_prompt_records_to_excel(
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "Results"
-    headers = ["query", "result", "sources", "source_urls", "source_titles"]
+    headers = ["platform", "query", "result", "sources", "source_urls", "source_titles"]
     sheet.append(headers)
 
     for record in records:
         sheet.append(
             [
+                record.platform,
                 record.query,
                 record.result,
                 record.sources,

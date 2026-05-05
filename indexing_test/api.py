@@ -32,6 +32,14 @@ API_DIR = Path(__file__).resolve().parent
 DEFAULT_GEO_CONFIG_PATH = os.getenv("GEO_INDEXING_CONFIG", "config.doubao.json")
 DEFAULT_GEO_OUTPUT_DIR = os.getenv("GEO_INDEXING_OUTPUT_DIR", "data/geo-runs")
 DEFAULT_GEO_TEST_ENVIRONMENT = os.getenv("GEO_TEST_ENVIRONMENT", "geo")
+DEFAULT_GEO_PLATFORM_CONFIGS: dict[str, str] = {
+    "doubao": "config.doubao.json",
+    "qwen": "config.qwen.json",
+    "deepseek": "config.deepseek.json",
+    "yuanbao": "config.yuanbao.json",
+    "kimi": "config.kimi.json",
+}
+DEFAULT_GEO_TEST_PLATFORMS = ["doubao", "qwen", "deepseek", "yuanbao", "kimi"]
 _JOB_LOCK = threading.Lock()
 _GEO_RUN_LOCK = threading.Lock()
 _JOB_STORE: dict[str, dict[str, Any]] = {}
@@ -42,7 +50,9 @@ class GeoOptimizeRequest(BaseModel):
     rewrite_count: int = Field(..., ge=1, le=50, description="Number of rewrites")
     company_name: str = Field(..., min_length=1, description="Company to optimize")
     test_environment: str = Field(default=DEFAULT_GEO_TEST_ENVIRONMENT, description="Test environment name")
-    config_path: str = Field(default=DEFAULT_GEO_CONFIG_PATH, description="Runtime config path")
+    config_path: str = Field(default=DEFAULT_GEO_CONFIG_PATH, description="Runtime config path used for query rewrite and report generation")
+    platform_config_paths: dict[str, str] | None = Field(default=None, description="Platform to config path mapping")
+    test_platforms: list[str] | None = Field(default=None, description="Platforms to test with the same rewritten queries")
     output_dir: str = Field(default=DEFAULT_GEO_OUTPUT_DIR, description="Directory for generated xlsx")
 
 
@@ -200,6 +210,40 @@ def build_analysis_prompt(
         "8. 不要输出 JSON 以外的内容"
     )
 
+
+
+def resolve_platform_config_paths(request: GeoOptimizeRequest) -> list[tuple[str, Path]]:
+    platform_config_paths = dict(DEFAULT_GEO_PLATFORM_CONFIGS)
+    if request.platform_config_paths:
+        platform_config_paths.update(request.platform_config_paths)
+
+    platforms = request.test_platforms or DEFAULT_GEO_TEST_PLATFORMS
+    resolved: list[tuple[str, Path]] = []
+    missing: list[str] = []
+    for platform in platforms:
+        config_value = platform_config_paths.get(platform)
+        if not config_value:
+            missing.append(f"{platform}: no config path")
+            continue
+        config_path = resolve_api_path(config_value)
+        if not config_path.exists():
+            missing.append(f"{platform}: {config_path}")
+            continue
+        resolved.append((platform, config_path))
+
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail="Missing platform config(s): " + "; ".join(missing),
+        )
+    if not resolved:
+        raise HTTPException(status_code=400, detail="No platform configs available for testing.")
+    return resolved
+
+
+def make_platform_test_environment(base_environment: str, platform_names: list[str]) -> str:
+    suffix = "+".join(platform_names)
+    return f"{base_environment}:{suffix}" if suffix else base_environment
 
 def build_reference_citation_counts(records: list[PromptRunRecord]) -> list[dict[str, Any]]:
     counter: Counter[str] = Counter()
@@ -488,9 +532,12 @@ def execute_geo_optimize(
         raise HTTPException(status_code=400, detail=f"Config file not found: {config_path}")
 
     config: AppConfig = load_config(config_path)
+    platform_config_paths = resolve_platform_config_paths(request)
+    platform_names = [platform for platform, _ in platform_config_paths]
+    test_environment = make_platform_test_environment(request.test_environment, platform_names)
 
     try:
-        set_stage("opening_browser")
+        set_stage("opening_browser_for_rewrite")
         with open_chat_page(config, interactive_login=False) as (_, page):
             set_stage("rewriting_queries")
             rewrite_response = send_prompt(
@@ -504,28 +551,38 @@ def execute_geo_optimize(
             )
             rewritten_queries = parse_rewrites(rewrite_response.text, request.rewrite_count)
 
-            records: list[PromptRunRecord] = []
-            for index, query in enumerate(rewritten_queries, start=1):
-                set_stage(f"testing_query_{index}_of_{len(rewritten_queries)}")
-                response = send_prompt(page, config, query)
-                records.append(
-                    PromptRunRecord(
-                        query=query,
-                        result=response.text,
-                        sources=response.sources,
-                        source_urls=response.source_urls,
-                        source_titles=response.source_titles,
+        records: list[PromptRunRecord] = []
+        for platform_index, (platform, platform_config_path) in enumerate(platform_config_paths, start=1):
+            platform_config = load_config(platform_config_path)
+            set_stage(f"opening_{platform}_{platform_index}_of_{len(platform_config_paths)}")
+            with open_chat_page(platform_config, interactive_login=False) as (_, page):
+                for query_index, query in enumerate(rewritten_queries, start=1):
+                    set_stage(
+                        f"testing_{platform}_query_{query_index}_of_{len(rewritten_queries)}"
                     )
-                )
+                    print(f"Running {platform} query {query_index}/{len(rewritten_queries)}", flush=True)
+                    response = send_prompt(page, platform_config, query)
+                    print(f"Finished {platform} query {query_index}/{len(rewritten_queries)}", flush=True)
+                    records.append(
+                        PromptRunRecord(
+                            query=query,
+                            result=response.text,
+                            sources=response.sources,
+                            source_urls=response.source_urls,
+                            source_titles=response.source_titles,
+                            platform=platform,
+                        )
+                    )
 
-            citation_counts = build_reference_citation_counts(records)
-            set_stage("building_final_audit_report")
+        citation_counts = build_reference_citation_counts(records)
+        set_stage("building_final_audit_report")
+        with open_chat_page(config, interactive_login=False) as (_, page):
             analysis_response = send_prompt(
                 page,
                 config,
                 build_analysis_prompt(
                     company_name=request.company_name,
-                    test_environment=request.test_environment,
+                    test_environment=test_environment,
                     user_test_query=request.user_test_query,
                     rewritten_queries=rewritten_queries,
                     records=records,
@@ -543,20 +600,21 @@ def execute_geo_optimize(
     if pending_fields:
         set_stage(f"filling_audit_report_gaps_{len(pending_fields)}")
         try:
-            gap_fill_response = send_prompt(
-                page,
-                config,
-                build_gap_fill_prompt(
-                    company_name=request.company_name,
-                    test_environment=request.test_environment,
-                    user_test_query=request.user_test_query,
-                    rewritten_queries=rewritten_queries,
-                    records=records,
-                    citation_counts=citation_counts,
-                    pending_fields=pending_fields,
-                ),
-                include_sources=False,
-            )
+            with open_chat_page(config, interactive_login=False) as (_, page):
+                gap_fill_response = send_prompt(
+                    page,
+                    config,
+                    build_gap_fill_prompt(
+                        company_name=request.company_name,
+                        test_environment=test_environment,
+                        user_test_query=request.user_test_query,
+                        rewritten_queries=rewritten_queries,
+                        records=records,
+                        citation_counts=citation_counts,
+                        pending_fields=pending_fields,
+                    ),
+                    include_sources=False,
+                )
             merge_gap_fill_response(analysis, gap_fill_response.text)
         except Exception as exc:
             print(f"Audit gap fill skipped: {exc}")
@@ -568,7 +626,8 @@ def execute_geo_optimize(
         output_path,
         summary={
             "report_title": str(analysis.get("report_title", REPORT_TITLE)),
-            "test_environment": request.test_environment,
+            "test_environment": test_environment,
+            "test_platforms": json.dumps(platform_names, ensure_ascii=False),
             "company_name": request.company_name,
             "user_test_query": request.user_test_query,
             "rewrite_count": str(request.rewrite_count),
@@ -578,13 +637,15 @@ def execute_geo_optimize(
     )
 
     result = {
-        "test_environment": request.test_environment,
+        "test_environment": test_environment,
+        "test_platforms": platform_names,
         "company_name": request.company_name,
         "user_test_query": request.user_test_query,
         "rewritten_queries": rewritten_queries,
         "excel_path": str(output_path),
         "excel_rows": [
             {
+                "platform": record.platform,
                 "query": record.query,
                 "result": record.result,
                 "sources": record.sources,
