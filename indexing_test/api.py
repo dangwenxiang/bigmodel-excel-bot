@@ -539,13 +539,35 @@ def execute_geo_optimize(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     analysis = parse_analysis(analysis_response.text)
+    pending_fields = collect_pending_report_fields(analysis)
+    if pending_fields:
+        set_stage(f"filling_audit_report_gaps_{len(pending_fields)}")
+        try:
+            gap_fill_response = send_prompt(
+                page,
+                config,
+                build_gap_fill_prompt(
+                    company_name=request.company_name,
+                    test_environment=request.test_environment,
+                    user_test_query=request.user_test_query,
+                    rewritten_queries=rewritten_queries,
+                    records=records,
+                    citation_counts=citation_counts,
+                    pending_fields=pending_fields,
+                ),
+                include_sources=False,
+            )
+            merge_gap_fill_response(analysis, gap_fill_response.text)
+        except Exception as exc:
+            print(f"Audit gap fill skipped: {exc}")
+
     output_path = output_path or make_output_path(request.output_dir, request.company_name)
     set_stage("writing_output_files")
     export_prompt_records_to_excel(
         records,
         output_path,
         summary={
-            "report_title": str(analysis.get("report_title", "GEO ????????")),
+            "report_title": str(analysis.get("report_title", REPORT_TITLE)),
             "test_environment": request.test_environment,
             "company_name": request.company_name,
             "user_test_query": request.user_test_query,
@@ -674,18 +696,18 @@ REPORT_TITLE = U("GEO \\u4f18\\u5316\\u8bca\\u65ad\\u5ba1\\u8ba1\\u62a5\\u544a")
 PENDING_TEXT = U("\\u6682\\u65e0\\u660e\\u786e\\u7ed3\\u8bba")
 
 AUDIT_SECTION_SCHEMA: list[dict[str, Any]] = [
-    {"key": "basic_info", "title": U("\\u4e00\\u3001\\u62a5\\u544a\\u57fa\\u7840\\u4fe1\\u606f"), "fields": [("brand_name", U("\\u54c1\\u724c / \\u4f01\\u4e1a\\u540d\\u79f0")), ("diagnosis_date", U("\\u62a5\\u544a\\u8bca\\u65ad\\u65e5\\u671f")), ("main_business", U("\\u6838\\u5fc3\\u4e3b\\u8425\\u4ea7\\u54c1 / \\u4e1a\\u52a1")), ("competitors", U("\\u6838\\u5fc3\\u5bf9\\u6807\\u7ade\\u54c1")), ("geo_score", U("\\u5f53\\u524d GEO \\u6574\\u4f53\\u8bc4\\u5206\\uff0810 \\u5206\\u5236\\uff09")), ("summary_conclusion", U("\\u8bca\\u65ad\\u7ed3\\u8bba\\u603b\\u89c8"))]},
-    {"key": "user_search_scenarios", "title": U("\\u4e8c\\u3001\\u54c1\\u724c\\u76ee\\u6807\\u7528\\u6237\\u753b\\u50cf & AI \\u641c\\u7d22\\u573a\\u666f\\u5206\\u6790"), "fields": [("target_users", U("\\u6838\\u5fc3\\u76ee\\u6807\\u4eba\\u7fa4")), ("search_scenarios", U("\\u9ad8\\u9891\\u641c\\u7d22\\u573a\\u666f")), ("common_question_patterns", U("\\u7528\\u6237\\u5e38\\u89c1\\u641c\\u7d22\\u63d0\\u95ee\\u53e5\\u5f0f")), ("unmet_search_needs", U("\\u6f5c\\u5728\\u672a\\u88ab\\u6ee1\\u8db3\\u7684\\u641c\\u7d22\\u9700\\u6c42"))]},
-    {"key": "infrastructure_assessment", "title": U("\\u4e09\\u3001GEO \\u57fa\\u7840\\u57fa\\u5efa\\u73b0\\u72b6\\u8bc4\\u4f30"), "fields": [("official_channels", U("\\u5b98\\u65b9\\u9635\\u5730")), ("web_coverage", U("\\u5168\\u7f51\\u4fe1\\u606f\\u8986\\u76d6")), ("brand_entry_completeness", U("\\u54c1\\u724c\\u57fa\\u7840\\u8bcd\\u6761\\u5b8c\\u6574\\u6027")), ("existing_problems", U("\\u73b0\\u6709\\u57fa\\u5efa\\u5b58\\u5728\\u95ee\\u9898"))]},
-    {"key": "authority_backlinks", "title": U("\\u56db\\u3001\\u6743\\u5a01\\u5a92\\u4f53 & \\u7b2c\\u4e09\\u65b9\\u80cc\\u4e66\\u6838\\u67e5"), "fields": [("media_reports", U("\\u5df2\\u6536\\u5f55\\u6743\\u5a01\\u5a92\\u4f53\\u62a5\\u9053\\u6e05\\u5355")), ("associations_certifications", U("\\u884c\\u4e1a\\u534f\\u4f1a / \\u8d44\\u8d28\\u8363\\u8a89 / \\u8ba4\\u8bc1\\u80cc\\u4e66\\u60c5\\u51b5")), ("missing_endorsements", U("\\u80cc\\u4e66\\u7f3a\\u5931\\u9879")), ("endorsement_suggestions", U("\\u80cc\\u4e66\\u8865\\u5145\\u5efa\\u8bae"))]},
-    {"key": "ai_platform_mentions", "title": U("\\u4e94\\u3001\\u4e3b\\u6d41 AI \\u5e73\\u53f0\\u54c1\\u724c\\u63d0\\u53ca\\u7387\\u68c0\\u6d4b"), "fields": [("platforms_checked", U("\\u68c0\\u6d4b\\u5e73\\u53f0")), ("mention_matrix", U("\\u5404\\u5e73\\u53f0\\u54c1\\u724c\\u6709\\u65e0\\u63d0\\u53ca")), ("positive_mentions", U("\\u54c1\\u724c\\u6b63\\u9762\\u63d0\\u53ca\\u5185\\u5bb9\\u6982\\u62ec")), ("low_mention_reasons", U("\\u65e0\\u63d0\\u53ca / \\u63d0\\u53ca\\u8fc7\\u5c11\\u539f\\u56e0")), ("blank_positions", U("AI \\u5e73\\u53f0\\u7a7a\\u767d\\u70b9\\u4f4d\\u6c47\\u603b"))]},
-    {"key": "search_heat_assessment", "title": U("\\u516d\\u3001\\u5168\\u7f51\\u641c\\u7d22\\u6307\\u6570 & \\u5e73\\u53f0\\u70ed\\u5ea6\\u8bc4\\u4f30"), "fields": [("search_heat_trend", U("\\u54c1\\u724c\\u5168\\u7f51\\u641c\\u7d22\\u70ed\\u5ea6\\u8d8b\\u52bf")), ("channel_mention_ratio", U("\\u5404\\u6e20\\u9053\\u54c1\\u724c\\u63d0\\u53ca\\u5360\\u6bd4")), ("high_traffic_gaps", U("\\u9ad8\\u6d41\\u91cf\\u6e20\\u9053\\u672a\\u5e03\\u5c40\\u70b9\\u4f4d")), ("search_weakness_summary", U("\\u641c\\u7d22\\u7aef\\u8584\\u5f31\\u73af\\u8282\\u603b\\u7ed3"))]},
-    {"key": "competitor_benchmark", "title": U("\\u4e03\\u3001\\u7ade\\u54c1 GEO \\u5bf9\\u6807\\u5bf9\\u6bd4\\u5206\\u6790"), "fields": [("competitors", U("\\u7ade\\u54c1\\u540d\\u5355")), ("coverage_comparison", U("\\u7ade\\u54c1\\u5728 AI \\u5e73\\u53f0 / \\u641c\\u7d22\\u7aef\\u8986\\u76d6\\u60c5\\u51b5\\u5bf9\\u6bd4")), ("competitor_advantages", U("\\u7ade\\u54c1\\u4f18\\u52bf\\u70b9\\uff08\\u53ef\\u501f\\u9274\\uff09")), ("differentiation_breakthroughs", U("\\u6211\\u65b9\\u5dee\\u5f02\\u5316\\u7a81\\u7834\\u70b9"))]},
-    {"key": "faq_opportunities", "title": U("\\u516b\\u3001\\u884c\\u4e1a & \\u7528\\u6237\\u9ad8\\u9891\\u95ee\\u9898\\u6c47\\u603b"), "fields": [("industry_common_faq", U("\\u884c\\u4e1a\\u901a\\u7528\\u9ad8\\u9891\\u95ee\\u7b54")), ("brand_specific_questions", U("\\u54c1\\u724c\\u4e13\\u5c5e\\u7528\\u6237\\u7591\\u95ee")), ("negative_sensitive_questions", U("\\u8d1f\\u9762\\u654f\\u611f\\u6f5c\\u5728\\u95ee\\u9898")), ("batch_qa_layout", U("\\u9700\\u6279\\u91cf\\u5e03\\u5c40\\u95ee\\u7b54\\u6e05\\u5355"))]},
-    {"key": "sentiment_monitoring", "title": U("\\u4e5d\\u3001\\u54c1\\u724c\\u8206\\u60c5\\u76d1\\u6d4b\\u5206\\u6790"), "fields": [("positive_sentiment", U("\\u6b63\\u9762\\u8206\\u60c5\\u5185\\u5bb9")), ("neutral_sentiment", U("\\u4e2d\\u6027\\u8206\\u60c5\\u5185\\u5bb9")), ("negative_risks", U("\\u8d1f\\u9762\\u8206\\u60c5 / \\u98ce\\u9669\\u70b9")), ("risk_level_warning", U("\\u8206\\u60c5\\u98ce\\u9669\\u7b49\\u7ea7 & \\u9884\\u8b66\\u8bf4\\u660e"))]},
-    {"key": "problem_summary", "title": U("\\u5341\\u3001GEO \\u95ee\\u9898\\u6c47\\u603b\\uff08\\u6838\\u5fc3\\u75db\\u70b9\\u6e05\\u5355\\uff09"), "fields": [("infrastructure_issues", U("\\u57fa\\u5efa\\u7c7b\\u95ee\\u9898")), ("ai_indexing_issues", U("AI \\u6536\\u5f55\\u7c7b\\u95ee\\u9898")), ("search_exposure_issues", U("\\u641c\\u7d22\\u66dd\\u5149\\u7c7b\\u95ee\\u9898")), ("trust_issues", U("\\u80cc\\u4e66\\u4fe1\\u4efb\\u7c7b\\u95ee\\u9898")), ("sentiment_risks", U("\\u8206\\u60c5\\u98ce\\u9669\\u7c7b\\u95ee\\u9898"))]},
-    {"key": "execution_plan", "title": U("\\u5341\\u4e00\\u3001GEO \\u4f18\\u5316\\u843d\\u5730\\u6267\\u884c\\u65b9\\u6848"), "fields": [("phase_1_infrastructure", U("\\u7b2c\\u4e00\\u9636\\u6bb5\\uff1a\\u57fa\\u7840\\u57fa\\u5efa\\u8865\\u5168")), ("phase_2_authority_sources", U("\\u7b2c\\u4e8c\\u9636\\u6bb5\\uff1a\\u6743\\u5a01\\u80cc\\u4e66 & \\u4fe1\\u6e90\\u642d\\u5efa")), ("phase_3_ai_content_seeding", U("\\u7b2c\\u4e09\\u9636\\u6bb5\\uff1aAI \\u641c\\u7d22\\u5185\\u5bb9\\u9884\\u57cb")), ("phase_4_multi_platform_distribution", U("\\u7b2c\\u56db\\u9636\\u6bb5\\uff1a\\u5168\\u7f51\\u591a\\u5e73\\u53f0\\u94fa\\u91cf")), ("phase_5_monitoring_iteration", U("\\u7b2c\\u4e94\\u9636\\u6bb5\\uff1a\\u5b9a\\u671f\\u76d1\\u6d4b & \\u8fed\\u4ee3\\u4f18\\u5316"))]},
-    {"key": "expected_outcomes", "title": U("\\u5341\\u4e8c\\u3001\\u9884\\u671f\\u4f18\\u5316\\u6548\\u679c\\u76ee\\u6807"), "fields": [("day_30_goal", U("30 \\u5929\\u76ee\\u6807")), ("day_60_goal", U("60 \\u5929\\u76ee\\u6807")), ("day_90_goal", U("90 \\u5929\\u76ee\\u6807"))]},
+    {"key": 'basic_info', "title": U('\\u4e00\\u3001\\u62a5\\u544a\\u57fa\\u7840\\u4fe1\\u606f'), "fields": [('brand_name', U('\\u54c1\\u724c / \\u4f01\\u4e1a\\u540d\\u79f0')), ('diagnosis_date', U('\\u62a5\\u544a\\u8bca\\u65ad\\u65e5\\u671f')), ('main_business', U('\\u6838\\u5fc3\\u4e3b\\u8425\\u4ea7\\u54c1 / \\u4e1a\\u52a1')), ('competitors', U('\\u6838\\u5fc3\\u5bf9\\u6807\\u7ade\\u54c1')), ('geo_score', U('\\u5f53\\u524d GEO \\u6574\\u4f53\\u8bc4\\u5206\\uff0810 \\u5206\\u5236\\uff09')), ('summary_conclusion', U('\\u8bca\\u65ad\\u7ed3\\u8bba\\u603b\\u89c8')), ('data_sources', U('\\u6570\\u636e\\u6765\\u6e90 / \\u5224\\u65ad\\u4f9d\\u636e'))]},
+    {"key": 'user_search_scenarios', "title": U('\\u4e8c\\u3001\\u54c1\\u724c\\u76ee\\u6807\\u7528\\u6237\\u753b\\u50cf & AI \\u641c\\u7d22\\u573a\\u666f\\u5206\\u6790'), "fields": [('target_users', U('\\u6838\\u5fc3\\u76ee\\u6807\\u4eba\\u7fa4')), ('search_scenarios', U('\\u9ad8\\u9891\\u641c\\u7d22\\u573a\\u666f')), ('common_question_patterns', U('\\u7528\\u6237\\u5e38\\u89c1\\u641c\\u7d22\\u63d0\\u95ee\\u53e5\\u5f0f')), ('unmet_search_needs', U('\\u6f5c\\u5728\\u672a\\u88ab\\u6ee1\\u8db3\\u7684\\u641c\\u7d22\\u9700\\u6c42')), ('data_sources', U('\\u6570\\u636e\\u6765\\u6e90 / \\u5224\\u65ad\\u4f9d\\u636e'))]},
+    {"key": 'infrastructure_assessment', "title": U('\\u4e09\\u3001GEO \\u57fa\\u7840\\u57fa\\u5efa\\u73b0\\u72b6\\u8bc4\\u4f30'), "fields": [('official_channels', U('\\u5b98\\u65b9\\u9635\\u5730')), ('web_coverage', U('\\u5168\\u7f51\\u4fe1\\u606f\\u8986\\u76d6')), ('brand_entry_completeness', U('\\u54c1\\u724c\\u57fa\\u7840\\u8bcd\\u6761\\u5b8c\\u6574\\u6027')), ('existing_problems', U('\\u73b0\\u6709\\u57fa\\u5efa\\u5b58\\u5728\\u95ee\\u9898')), ('data_sources', U('\\u6570\\u636e\\u6765\\u6e90 / \\u5224\\u65ad\\u4f9d\\u636e'))]},
+    {"key": 'authority_backlinks', "title": U('\\u56db\\u3001\\u6743\\u5a01\\u5a92\\u4f53 & \\u7b2c\\u4e09\\u65b9\\u80cc\\u4e66\\u6838\\u67e5'), "fields": [('media_reports', U('\\u5df2\\u6536\\u5f55\\u6743\\u5a01\\u5a92\\u4f53\\u62a5\\u9053\\u6e05\\u5355')), ('associations_certifications', U('\\u884c\\u4e1a\\u534f\\u4f1a / \\u8d44\\u8d28\\u8363\\u8a89 / \\u8ba4\\u8bc1\\u80cc\\u4e66\\u60c5\\u51b5')), ('source_quality_rating', U('\\u4fe1\\u6e90\\u8d28\\u91cf\\u8bc4\\u7ea7')), ('citation_grid_health', U('\\u5f15\\u7528\\u7f51\\u683c\\u5065\\u5eb7\\u5ea6')), ('missing_endorsements', U('\\u80cc\\u4e66\\u7f3a\\u5931\\u9879')), ('endorsement_suggestions', U('\\u80cc\\u4e66\\u8865\\u5145\\u5efa\\u8bae')), ('data_sources', U('\\u6570\\u636e\\u6765\\u6e90 / \\u5224\\u65ad\\u4f9d\\u636e'))]},
+    {"key": 'ai_platform_mentions', "title": U('\\u4e94\\u3001\\u4e3b\\u6d41 AI \\u5e73\\u53f0\\u54c1\\u724c\\u63d0\\u53ca\\u7387\\u68c0\\u6d4b'), "fields": [('platforms_checked', U('\\u68c0\\u6d4b\\u5e73\\u53f0')), ('mention_matrix', U('\\u5404\\u5e73\\u53f0\\u54c1\\u724c\\u6709\\u65e0\\u63d0\\u53ca')), ('positive_mentions', U('\\u54c1\\u724c\\u6b63\\u9762\\u63d0\\u53ca\\u5185\\u5bb9\\u6982\\u62ec')), ('semantic_alignment', U('\\u8bed\\u4e49\\u5bf9\\u9f50\\u5ea6')), ('matched_semantic_tags', U('AI \\u8f93\\u51fa\\u5173\\u952e\\u8bcd\\u4e0e\\u54c1\\u724c\\u6838\\u5fc3\\u4f18\\u52bf\\u5339\\u914d\\u60c5\\u51b5')), ('sentiment_bias', U('\\u60c5\\u611f\\u504f\\u5411')), ('low_mention_reasons', U('\\u65e0\\u63d0\\u53ca / \\u63d0\\u53ca\\u8fc7\\u5c11\\u539f\\u56e0')), ('blank_positions', U('AI \\u5e73\\u53f0\\u7a7a\\u767d\\u70b9\\u4f4d\\u6c47\\u603b')), ('data_sources', U('\\u6570\\u636e\\u6765\\u6e90 / \\u5224\\u65ad\\u4f9d\\u636e'))]},
+    {"key": 'search_heat_assessment', "title": U('\\u516d\\u3001\\u5168\\u7f51\\u641c\\u7d22\\u6307\\u6570 & \\u5e73\\u53f0\\u70ed\\u5ea6\\u8bc4\\u4f30'), "fields": [('search_heat_trend', U('\\u54c1\\u724c\\u5168\\u7f51\\u641c\\u7d22\\u70ed\\u5ea6\\u8d8b\\u52bf')), ('channel_mention_ratio', U('\\u5404\\u6e20\\u9053\\u54c1\\u724c\\u63d0\\u53ca\\u5360\\u6bd4')), ('high_traffic_gaps', U('\\u9ad8\\u6d41\\u91cf\\u6e20\\u9053\\u672a\\u5e03\\u5c40\\u70b9\\u4f4d')), ('search_weakness_summary', U('\\u641c\\u7d22\\u7aef\\u8584\\u5f31\\u73af\\u8282\\u603b\\u7ed3')), ('data_sources', U('\\u6570\\u636e\\u6765\\u6e90 / \\u5224\\u65ad\\u4f9d\\u636e'))]},
+    {"key": 'competitor_benchmark', "title": U('\\u4e03\\u3001\\u7ade\\u54c1 GEO \\u5bf9\\u6807\\u5bf9\\u6bd4\\u5206\\u6790'), "fields": [('competitors', U('\\u7ade\\u54c1\\u540d\\u5355')), ('coverage_comparison', U('\\u7ade\\u54c1\\u5728 AI \\u5e73\\u53f0 / \\u641c\\u7d22\\u7aef\\u8986\\u76d6\\u60c5\\u51b5\\u5bf9\\u6bd4')), ('competitor_advantages', U('\\u7ade\\u54c1\\u4f18\\u52bf\\u70b9\\uff08\\u53ef\\u501f\\u9274\\uff09')), ('semantic_differentiation_comparison', U('\\u8bed\\u4e49\\u5dee\\u5f02\\u5316\\u5bf9\\u6bd4')), ('differentiation_breakthroughs', U('\\u6211\\u65b9\\u5dee\\u5f02\\u5316\\u7a81\\u7834\\u70b9')), ('data_sources', U('\\u6570\\u636e\\u6765\\u6e90 / \\u5224\\u65ad\\u4f9d\\u636e'))]},
+    {"key": 'faq_opportunities', "title": U('\\u516b\\u3001\\u884c\\u4e1a & \\u7528\\u6237\\u9ad8\\u9891\\u95ee\\u9898\\u6c47\\u603b'), "fields": [('industry_common_faq', U('\\u884c\\u4e1a\\u901a\\u7528\\u9ad8\\u9891\\u95ee\\u7b54')), ('brand_specific_questions', U('\\u54c1\\u724c\\u4e13\\u5c5e\\u7528\\u6237\\u7591\\u95ee')), ('negative_sensitive_questions', U('\\u8d1f\\u9762\\u654f\\u611f\\u6f5c\\u5728\\u95ee\\u9898')), ('batch_qa_layout', U('\\u9700\\u6279\\u91cf\\u5e03\\u5c40\\u95ee\\u7b54\\u6e05\\u5355')), ('data_sources', U('\\u6570\\u636e\\u6765\\u6e90 / \\u5224\\u65ad\\u4f9d\\u636e'))]},
+    {"key": 'sentiment_monitoring', "title": U('\\u4e5d\\u3001\\u54c1\\u724c\\u8206\\u60c5\\u76d1\\u6d4b\\u5206\\u6790'), "fields": [('positive_sentiment', U('\\u6b63\\u9762\\u8206\\u60c5\\u5185\\u5bb9')), ('neutral_sentiment', U('\\u4e2d\\u6027\\u8206\\u60c5\\u5185\\u5bb9')), ('negative_risks', U('\\u8d1f\\u9762\\u8206\\u60c5 / \\u98ce\\u9669\\u70b9')), ('risk_level_warning', U('\\u8206\\u60c5\\u98ce\\u9669\\u7b49\\u7ea7 & \\u9884\\u8b66\\u8bf4\\u660e')), ('data_sources', U('\\u6570\\u636e\\u6765\\u6e90 / \\u5224\\u65ad\\u4f9d\\u636e'))]},
+    {"key": 'problem_summary', "title": U('\\u5341\\u3001GEO \\u95ee\\u9898\\u6c47\\u603b\\uff08\\u6838\\u5fc3\\u75db\\u70b9\\u6e05\\u5355\\uff09'), "fields": [('infrastructure_issues', U('\\u57fa\\u5efa\\u7c7b\\u95ee\\u9898')), ('ai_indexing_issues', U('AI \\u6536\\u5f55\\u7c7b\\u95ee\\u9898')), ('search_exposure_issues', U('\\u641c\\u7d22\\u66dd\\u5149\\u7c7b\\u95ee\\u9898')), ('trust_issues', U('\\u80cc\\u4e66\\u4fe1\\u4efb\\u7c7b\\u95ee\\u9898')), ('sentiment_risks', U('\\u8206\\u60c5\\u98ce\\u9669\\u7c7b\\u95ee\\u9898')), ('data_sources', U('\\u6570\\u636e\\u6765\\u6e90 / \\u5224\\u65ad\\u4f9d\\u636e'))]},
+    {"key": 'execution_plan', "title": U('\\u5341\\u4e00\\u3001GEO \\u4f18\\u5316\\u843d\\u5730\\u6267\\u884c\\u65b9\\u6848'), "fields": [('phase_1_infrastructure', U('\\u7b2c\\u4e00\\u9636\\u6bb5\\uff1a\\u57fa\\u7840\\u57fa\\u5efa\\u8865\\u5168')), ('phase_2_authority_sources', U('\\u7b2c\\u4e8c\\u9636\\u6bb5\\uff1a\\u6743\\u5a01\\u80cc\\u4e66 & \\u4fe1\\u6e90\\u642d\\u5efa')), ('phase_3_ai_content_seeding', U('\\u7b2c\\u4e09\\u9636\\u6bb5\\uff1aAI \\u641c\\u7d22\\u5185\\u5bb9\\u9884\\u57cb')), ('phase_4_multi_platform_distribution', U('\\u7b2c\\u56db\\u9636\\u6bb5\\uff1a\\u5168\\u7f51\\u591a\\u5e73\\u53f0\\u94fa\\u91cf')), ('phase_5_monitoring_iteration', U('\\u7b2c\\u4e94\\u9636\\u6bb5\\uff1a\\u5b9a\\u671f\\u76d1\\u6d4b & \\u8fed\\u4ee3\\u4f18\\u5316')), ('data_sources', U('\\u6570\\u636e\\u6765\\u6e90 / \\u5224\\u65ad\\u4f9d\\u636e'))]},
+    {"key": 'expected_outcomes', "title": U('\\u5341\\u4e8c\\u3001\\u9884\\u671f\\u4f18\\u5316\\u6548\\u679c\\u76ee\\u6807'), "fields": [('day_30_goal', U('30 \\u5929\\u76ee\\u6807')), ('day_60_goal', U('60 \\u5929\\u76ee\\u6807')), ('day_90_goal', U('90 \\u5929\\u76ee\\u6807')), ('data_sources', U('\\u6570\\u636e\\u6765\\u6e90 / \\u5224\\u65ad\\u4f9d\\u636e'))]},
 ]
 
 
@@ -715,22 +737,26 @@ def build_analysis_prompt(company_name: str, test_environment: str, user_test_qu
     return f"""
 {U('\\u4f60\\u662f\\u4e00\\u540d GEO \\u4f18\\u5316\\u8bca\\u65ad\\u5ba1\\u8ba1\\u987e\\u95ee\\u3002\\u8bf7\\u57fa\\u4e8e\\u6d4b\\u8bd5\\u6570\\u636e\\uff0c\\u751f\\u6210\\u7ed3\\u6784\\u5316 JSON\\uff0c\\u7528\\u4e8e\\u6e32\\u67d3\\u300aGEO \\u4f18\\u5316\\u8bca\\u65ad\\u5ba1\\u8ba1\\u62a5\\u544a\\u300b\\u3002')}
 
-{U('\\u76ee\\u6807\\u54c1\\u724c / \\u4f01\\u4e1a')}?{company_name}
-{U('\\u6d4b\\u8bd5\\u73af\\u5883')}?{test_environment}
-{U('\\u539f\\u59cb\\u6d4b\\u8bd5\\u95ee\\u9898')}?{user_test_query}
-{U('\\u6539\\u5199\\u6d4b\\u8bd5\\u95ee\\u9898')}?{json.dumps(rewritten_queries, ensure_ascii=False)}
-AI {U('\\u5e73\\u53f0\\u6d4b\\u8bd5\\u7ed3\\u679c\\u6458\\u8981')}?{json.dumps(result_summaries, ensure_ascii=False)}
-{U('\\u4fe1\\u6e90\\u5f15\\u7528\\u7edf\\u8ba1')}?{json.dumps(citation_counts, ensure_ascii=False)}
+{U('\\u76ee\\u6807\\u54c1\\u724c / \\u4f01\\u4e1a')}: {company_name}
+{U('\\u6d4b\\u8bd5\\u73af\\u5883')}: {test_environment}
+{U('\\u539f\\u59cb\\u6d4b\\u8bd5\\u95ee\\u9898')}: {user_test_query}
+{U('\\u6539\\u5199\\u6d4b\\u8bd5\\u95ee\\u9898')}: {json.dumps(rewritten_queries, ensure_ascii=False)}
+AI {U('\\u5e73\\u53f0\\u6d4b\\u8bd5\\u7ed3\\u679c\\u6458\\u8981')}: {json.dumps(result_summaries, ensure_ascii=False)}
+{U('\\u4fe1\\u6e90\\u5f15\\u7528\\u7edf\\u8ba1')}: {json.dumps(citation_counts, ensure_ascii=False)}
 
-{U('\\u8f93\\u51fa\\u8981\\u6c42')}?
+{U('\\u8f93\\u51fa\\u8981\\u6c42')}: 
 1. {U('\\u53ea\\u8f93\\u51fa JSON \\u5bf9\\u8c61\\uff0c\\u4e0d\\u8981 Markdown\\uff0c\\u4e0d\\u8981\\u89e3\\u91ca\\u3002')}
 2. {U('\\u5fc5\\u987b\\u5305\\u542b report_title\\u3001sections\\u3001analysis_conclusion \\u4e09\\u4e2a\\u9876\\u5c42\\u5b57\\u6bb5\\u3002')}
 3. sections {U('\\u5fc5\\u987b\\u4e25\\u683c\\u4f7f\\u7528\\u4e0b\\u9762\\u7ed9\\u51fa\\u7684 12 \\u4e2a\\u952e\\uff0c\\u6bcf\\u4e2a\\u952e\\u4e0b\\u5fc5\\u987b\\u5305\\u542b\\u6307\\u5b9a\\u5b57\\u6bb5\\u3002')}
 4. {U('\\u6bcf\\u4e2a\\u5b57\\u6bb5\\u4f18\\u5148\\u8f93\\u51fa 2-5 \\u6761\\u77ed\\u8981\\u70b9\\uff1b\\u6ca1\\u6709\\u4f9d\\u636e\\u65f6\\u5199\\u201c\\u6682\\u65e0\\u660e\\u786e\\u7ed3\\u8bba\\u201d\\uff0c\\u4e0d\\u8981\\u8f93\\u51fa\\u95ee\\u53f7\\u3002')}
 5. {U('\\u4e0d\\u786e\\u5b9a\\u7684\\u4fe1\\u606f\\u4e0d\\u8981\\u7f16\\u9020\\u5177\\u4f53\\u8d44\\u8d28\\u3001\\u5a92\\u4f53\\u3001\\u641c\\u7d22\\u6307\\u6570\\u6216\\u7b2c\\u4e09\\u65b9\\u6570\\u636e\\u3002')}
 6. {U('\\u5a92\\u4f53\\u3001\\u94fe\\u63a5\\u3001AI \\u63d0\\u53ca\\u60c5\\u51b5\\u53ea\\u80fd\\u57fa\\u4e8e\\u6d4b\\u8bd5\\u7ed3\\u679c\\u548c\\u4fe1\\u6e90\\u5f15\\u7528\\u7edf\\u8ba1\\u5f52\\u7eb3\\u3002')}
+7. 每个章节的 data_sources 字段必须列出 2-5 条依据，例如：测试问题、AI 回答摘要、引用来源标题 / URL、平台检测结果、引用统计。
+8. 第四章必须输出 source_quality_rating 和 citation_grid_health，评级可用“强 / 中 / 弱”，并说明引用网格覆盖官网、媒体、第三方平台、行业平台的情况。
+9. 第五章必须输出 semantic_alignment、matched_semantic_tags、sentiment_bias，语义对齐度可用“高 / 中 / 低”，情感偏向可用“正向 / 中性 / 负向 / 模糊”。
+10. 第七章必须输出 semantic_differentiation_comparison，对比我方与竞品在 AI 描述关键词、推荐理由、差异化卖点上的差异。
 
-JSON {U('\\u7ed3\\u6784\\u6a21\\u677f')}?
+JSON {U('\\u7ed3\\u6784\\u6a21\\u677f')}: 
 {json.dumps({"report_title": REPORT_TITLE, "analysis_conclusion": "", "sections": schema}, ensure_ascii=False, indent=2)}
 """.strip()
 
@@ -771,6 +797,99 @@ def parse_analysis(text: str) -> dict[str, Any]:
         pass
     return {"report_title": REPORT_TITLE, "analysis_conclusion": text.strip(), "sections": default_report_sections()}
 
+
+
+
+def collect_pending_report_fields(analysis: dict[str, Any], limit: int = 24) -> list[dict[str, str]]:
+    sections = normalize_report_sections(analysis)
+    pending: list[dict[str, str]] = []
+    for section in AUDIT_SECTION_SCHEMA:
+        section_data = sections.get(section["key"], {})
+        for field_key, field_label in section["fields"]:
+            if is_blank_report_value(section_data.get(field_key)):
+                pending.append(
+                    {
+                        "section_key": section["key"],
+                        "section_title": section["title"],
+                        "field_key": field_key,
+                        "field_label": field_label,
+                    }
+                )
+                if len(pending) >= limit:
+                    return pending
+    return pending
+
+
+def build_gap_fill_prompt(
+    company_name: str,
+    test_environment: str,
+    user_test_query: str,
+    rewritten_queries: list[str],
+    records: list[PromptRunRecord],
+    citation_counts: list[dict[str, Any]],
+    pending_fields: list[dict[str, str]],
+) -> str:
+    result_summaries = [
+        {
+            "query": record.query,
+            "result_excerpt": record.result[:1200],
+            "sources": [item for item in record.sources.splitlines() if item.strip()][:8],
+            "source_urls": [item for item in record.source_urls.splitlines() if item.strip()][:8],
+            "source_titles": [item for item in record.source_titles.splitlines() if item.strip()][:8],
+        }
+        for record in records
+    ]
+    return f"""
+{U('\\u4f60\\u6b63\\u5728\\u8865\\u5168\\u300aGEO \\u4f18\\u5316\\u8bca\\u65ad\\u5ba1\\u8ba1\\u62a5\\u544a\\u300b\\u4e2d\\u4ecd\\u4e3a\\u7a7a\\u6216\\u201c\\u6682\\u65e0\\u660e\\u786e\\u7ed3\\u8bba\\u201d\\u7684\\u5b57\\u6bb5\\u3002')}
+
+{U('\\u76ee\\u6807\\u54c1\\u724c / \\u4f01\\u4e1a')}: {company_name}
+{U('\\u6d4b\\u8bd5\\u73af\\u5883')}: {test_environment}
+{U('\\u539f\\u59cb\\u6d4b\\u8bd5\\u95ee\\u9898')}: {user_test_query}
+{U('\\u6539\\u5199\\u6d4b\\u8bd5\\u95ee\\u9898')}: {json.dumps(rewritten_queries, ensure_ascii=False)}
+AI {U('\\u5e73\\u53f0\\u6d4b\\u8bd5\\u7ed3\\u679c\\u6458\\u8981')}: {json.dumps(result_summaries, ensure_ascii=False)}
+{U('\\u4fe1\\u6e90\\u5f15\\u7528\\u7edf\\u8ba1')}: {json.dumps(citation_counts, ensure_ascii=False)}
+{U('\\u9700\\u8981\\u8865\\u5168\\u7684\\u5b57\\u6bb5')}: {json.dumps(pending_fields, ensure_ascii=False)}
+
+{U('\\u8f93\\u51fa\\u8981\\u6c42')}: 
+1. {U('\\u53ea\\u8f93\\u51fa JSON \\u5bf9\\u8c61\\uff0c\\u4e0d\\u8981 Markdown\\uff0c\\u4e0d\\u8981\\u89e3\\u91ca\\u3002')}
+2. {U('\\u53ea\\u8865\\u5168\\u201c\\u9700\\u8981\\u8865\\u5168\\u7684\\u5b57\\u6bb5\\u201d\\uff0c\\u4e0d\\u8981\\u8f93\\u51fa\\u5176\\u4ed6\\u5b57\\u6bb5\\u3002')}
+3. {U('\\u9876\\u5c42\\u7ed3\\u6784\\u5fc5\\u987b\\u662f')}?{{"sections": {{"section_key": {{"field_key": value}}}}}}
+4. {U('\\u6bcf\\u4e2a\\u5b57\\u6bb5\\u7ed9\\u51fa 2-4 \\u6761\\u77ed\\u8981\\u70b9\\uff0c\\u4f18\\u5148\\u57fa\\u4e8e\\u73b0\\u6709\\u6d4b\\u8bd5\\u7ed3\\u679c\\u5408\\u7406\\u5f52\\u7eb3\\u3002')}
+5. {U('\\u5982\\u679c\\u6ca1\\u6709\\u76f4\\u63a5\\u8bc1\\u636e\\uff0c\\u53ef\\u4ee5\\u7ed9\\u51fa\\u201c\\u5efa\\u8bae\\u6838\\u67e5 / \\u5efa\\u8bae\\u8865\\u5145\\u201d\\u7684\\u884c\\u52a8\\u578b\\u7ed3\\u8bba\\uff0c\\u4f46\\u4e0d\\u8981\\u5199\\u201c\\u6682\\u65e0\\u660e\\u786e\\u7ed3\\u8bba\\u201d\\uff0c\\u4e5f\\u4e0d\\u8981\\u8f93\\u51fa\\u95ee\\u53f7\\u3002')}
+6. {U('\\u4e0d\\u8981\\u7f16\\u9020\\u5177\\u4f53\\u5a92\\u4f53\\u6807\\u9898\\u3001\\u8bc1\\u4e66\\u3001\\u641c\\u7d22\\u6307\\u6570\\u3001\\u5e73\\u53f0\\u6570\\u636e\\uff1b\\u4e0d\\u786e\\u5b9a\\u65f6\\u5199\\u6210\\u5efa\\u8bae\\u6216\\u5f85\\u6838\\u67e5\\u65b9\\u5411\\u3002')}
+7. {U('\\u5982\\u679c\\u8865\\u5168\\u5b57\\u6bb5\\u662f data_sources\\uff0c\\u5fc5\\u987b\\u5217\\u51fa\\u53ef\\u8ffd\\u6eaf\\u4f9d\\u636e\\uff0c\\u4f8b\\u5982\\u6d4b\\u8bd5\\u95ee\\u9898\\u3001AI \\u56de\\u7b54\\u6458\\u8981\\u3001\\u5f15\\u7528\\u6765\\u6e90\\u6807\\u9898 / URL\\u3001\\u5f15\\u7528\\u7edf\\u8ba1\\u3002')}
+8. {U('\\u5982\\u679c\\u8865\\u5168\\u5b57\\u6bb5\\u6d89\\u53ca\\u8bed\\u4e49\\u5bf9\\u9f50\\u3001\\u60c5\\u611f\\u504f\\u5411\\u3001\\u4fe1\\u6e90\\u8d28\\u91cf\\u3001\\u5f15\\u7528\\u7f51\\u683c\\u3001\\u7ade\\u54c1\\u5dee\\u5f02\\u5316\\uff0c\\u5fc5\\u987b\\u7ed9\\u51fa\\u8bc4\\u7ea7 / \\u5224\\u65ad\\u548c\\u5bf9\\u5e94\\u4f9d\\u636e\\u3002')}
+""".strip()
+
+
+def merge_gap_fill_response(analysis: dict[str, Any], text: str) -> int:
+    try:
+        payload = parse_json_payload(text)
+    except ValueError:
+        return 0
+    if not isinstance(payload, dict):
+        return 0
+    incoming_sections = payload.get("sections")
+    if not isinstance(incoming_sections, dict):
+        return 0
+
+    analysis_sections = analysis.setdefault("sections", default_report_sections())
+    filled = 0
+    for section in AUDIT_SECTION_SCHEMA:
+        section_key = section["key"]
+        incoming_section = incoming_sections.get(section_key)
+        if not isinstance(incoming_section, dict):
+            continue
+        target_section = analysis_sections.setdefault(section_key, {})
+        allowed_fields = {field_key for field_key, _ in section["fields"]}
+        for field_key, value in incoming_section.items():
+            if field_key not in allowed_fields or is_blank_report_value(value):
+                continue
+            if is_blank_report_value(target_section.get(field_key)):
+                target_section[field_key] = value
+                filled += 1
+    analysis["sections"] = normalize_report_sections(analysis)
+    return filled
 
 def html_text(value: Any) -> str:
     if is_blank_report_value(value):
@@ -861,7 +980,7 @@ def build_html_report(payload: dict[str, Any]) -> str:
   </style>
 </head>
 <body>
-  <div style="display:none">{U('\\u54c1\\u724c')}?{escape(company_name)}?{U('\\u751f\\u6210\\u65f6\\u95f4')}?{escape(generated_at)}</div>
+  <div style="display:none">{U('\\u54c1\\u724c')}: {escape(company_name)}; {U('\\u751f\\u6210\\u65f6\\u95f4')}: {escape(generated_at)}</div>
   {pages}
 </body>
 </html>"""
