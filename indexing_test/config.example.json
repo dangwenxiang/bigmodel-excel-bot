@@ -14,6 +14,9 @@
     "user_data_dir": "./browser-profile",
     "channel": "chrome",
     "headless": false,
+    "connect_over_cdp": false,
+    "cdp_endpoint": "http://127.0.0.1:9222",
+    "new_page_per_session": false,
     "startup_wait_ms": 3000,
     "action_timeout_ms": 15000
   },
@@ -48,6 +51,15 @@
     "send_hotkey": "Enter",
     "clear_input_hotkey": "Control+A",
     "new_chat_each_prompt": true,
-    "manual_login": true
+    "new_chat_on_session_start": true,
+    "manual_login": true,
+    "manual_popup_confirmation": true,
+    "manual_verification_timeout_seconds": 0
+  },
+  "rate_limit": {
+    "min_delay_seconds": 8,
+    "max_delay_seconds": 20,
+    "pause_every_n_prompts": 10,
+    "pause_seconds": 120
   }
 }

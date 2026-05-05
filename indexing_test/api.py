@@ -545,21 +545,13 @@ def execute_geo_optimize(
         records,
         output_path,
         summary={
-            "report_title": str(analysis.get("report_title", "GEO 品牌 AI 审计报告")),
+            "report_title": str(analysis.get("report_title", "GEO ????????")),
             "test_environment": request.test_environment,
             "company_name": request.company_name,
             "user_test_query": request.user_test_query,
             "rewrite_count": str(request.rewrite_count),
             "analysis_conclusion": str(analysis.get("analysis_conclusion", "")),
-            "optimized_company_assessment": str(analysis.get("optimized_company_assessment", "")),
-            "audit_dimensions": json.dumps(analysis.get("audit_dimensions", {}), ensure_ascii=False),
-            "corpus_gap_scan": json.dumps(analysis.get("corpus_gap_scan", {}), ensure_ascii=False),
-            "digital_sovereignty_assessment": json.dumps(
-                analysis.get("digital_sovereignty_assessment", {}),
-                ensure_ascii=False,
-            ),
-            "visualization_summary": json.dumps(analysis.get("visualization_summary", {}), ensure_ascii=False),
-            "service_package_mapping": json.dumps(analysis.get("service_package_mapping", []), ensure_ascii=False),
+            "report_sections": json.dumps(analysis.get("sections", {}), ensure_ascii=False),
         },
     )
 
@@ -667,6 +659,234 @@ def create_geo_job(request: GeoOptimizeRequest) -> dict[str, Any]:
         "created_at": created_at,
         **file_paths,
     }
+
+
+# ---------------------------------------------------------------------------
+# GEO audit report template v2
+# ---------------------------------------------------------------------------
+
+
+def U(value: str) -> str:
+    return value.encode("ascii").decode("unicode_escape")
+
+
+REPORT_TITLE = U("GEO \\u4f18\\u5316\\u8bca\\u65ad\\u5ba1\\u8ba1\\u62a5\\u544a")
+PENDING_TEXT = U("\\u6682\\u65e0\\u660e\\u786e\\u7ed3\\u8bba")
+
+AUDIT_SECTION_SCHEMA: list[dict[str, Any]] = [
+    {"key": "basic_info", "title": U("\\u4e00\\u3001\\u62a5\\u544a\\u57fa\\u7840\\u4fe1\\u606f"), "fields": [("brand_name", U("\\u54c1\\u724c / \\u4f01\\u4e1a\\u540d\\u79f0")), ("diagnosis_date", U("\\u62a5\\u544a\\u8bca\\u65ad\\u65e5\\u671f")), ("main_business", U("\\u6838\\u5fc3\\u4e3b\\u8425\\u4ea7\\u54c1 / \\u4e1a\\u52a1")), ("competitors", U("\\u6838\\u5fc3\\u5bf9\\u6807\\u7ade\\u54c1")), ("geo_score", U("\\u5f53\\u524d GEO \\u6574\\u4f53\\u8bc4\\u5206\\uff0810 \\u5206\\u5236\\uff09")), ("summary_conclusion", U("\\u8bca\\u65ad\\u7ed3\\u8bba\\u603b\\u89c8"))]},
+    {"key": "user_search_scenarios", "title": U("\\u4e8c\\u3001\\u54c1\\u724c\\u76ee\\u6807\\u7528\\u6237\\u753b\\u50cf & AI \\u641c\\u7d22\\u573a\\u666f\\u5206\\u6790"), "fields": [("target_users", U("\\u6838\\u5fc3\\u76ee\\u6807\\u4eba\\u7fa4")), ("search_scenarios", U("\\u9ad8\\u9891\\u641c\\u7d22\\u573a\\u666f")), ("common_question_patterns", U("\\u7528\\u6237\\u5e38\\u89c1\\u641c\\u7d22\\u63d0\\u95ee\\u53e5\\u5f0f")), ("unmet_search_needs", U("\\u6f5c\\u5728\\u672a\\u88ab\\u6ee1\\u8db3\\u7684\\u641c\\u7d22\\u9700\\u6c42"))]},
+    {"key": "infrastructure_assessment", "title": U("\\u4e09\\u3001GEO \\u57fa\\u7840\\u57fa\\u5efa\\u73b0\\u72b6\\u8bc4\\u4f30"), "fields": [("official_channels", U("\\u5b98\\u65b9\\u9635\\u5730")), ("web_coverage", U("\\u5168\\u7f51\\u4fe1\\u606f\\u8986\\u76d6")), ("brand_entry_completeness", U("\\u54c1\\u724c\\u57fa\\u7840\\u8bcd\\u6761\\u5b8c\\u6574\\u6027")), ("existing_problems", U("\\u73b0\\u6709\\u57fa\\u5efa\\u5b58\\u5728\\u95ee\\u9898"))]},
+    {"key": "authority_backlinks", "title": U("\\u56db\\u3001\\u6743\\u5a01\\u5a92\\u4f53 & \\u7b2c\\u4e09\\u65b9\\u80cc\\u4e66\\u6838\\u67e5"), "fields": [("media_reports", U("\\u5df2\\u6536\\u5f55\\u6743\\u5a01\\u5a92\\u4f53\\u62a5\\u9053\\u6e05\\u5355")), ("associations_certifications", U("\\u884c\\u4e1a\\u534f\\u4f1a / \\u8d44\\u8d28\\u8363\\u8a89 / \\u8ba4\\u8bc1\\u80cc\\u4e66\\u60c5\\u51b5")), ("missing_endorsements", U("\\u80cc\\u4e66\\u7f3a\\u5931\\u9879")), ("endorsement_suggestions", U("\\u80cc\\u4e66\\u8865\\u5145\\u5efa\\u8bae"))]},
+    {"key": "ai_platform_mentions", "title": U("\\u4e94\\u3001\\u4e3b\\u6d41 AI \\u5e73\\u53f0\\u54c1\\u724c\\u63d0\\u53ca\\u7387\\u68c0\\u6d4b"), "fields": [("platforms_checked", U("\\u68c0\\u6d4b\\u5e73\\u53f0")), ("mention_matrix", U("\\u5404\\u5e73\\u53f0\\u54c1\\u724c\\u6709\\u65e0\\u63d0\\u53ca")), ("positive_mentions", U("\\u54c1\\u724c\\u6b63\\u9762\\u63d0\\u53ca\\u5185\\u5bb9\\u6982\\u62ec")), ("low_mention_reasons", U("\\u65e0\\u63d0\\u53ca / \\u63d0\\u53ca\\u8fc7\\u5c11\\u539f\\u56e0")), ("blank_positions", U("AI \\u5e73\\u53f0\\u7a7a\\u767d\\u70b9\\u4f4d\\u6c47\\u603b"))]},
+    {"key": "search_heat_assessment", "title": U("\\u516d\\u3001\\u5168\\u7f51\\u641c\\u7d22\\u6307\\u6570 & \\u5e73\\u53f0\\u70ed\\u5ea6\\u8bc4\\u4f30"), "fields": [("search_heat_trend", U("\\u54c1\\u724c\\u5168\\u7f51\\u641c\\u7d22\\u70ed\\u5ea6\\u8d8b\\u52bf")), ("channel_mention_ratio", U("\\u5404\\u6e20\\u9053\\u54c1\\u724c\\u63d0\\u53ca\\u5360\\u6bd4")), ("high_traffic_gaps", U("\\u9ad8\\u6d41\\u91cf\\u6e20\\u9053\\u672a\\u5e03\\u5c40\\u70b9\\u4f4d")), ("search_weakness_summary", U("\\u641c\\u7d22\\u7aef\\u8584\\u5f31\\u73af\\u8282\\u603b\\u7ed3"))]},
+    {"key": "competitor_benchmark", "title": U("\\u4e03\\u3001\\u7ade\\u54c1 GEO \\u5bf9\\u6807\\u5bf9\\u6bd4\\u5206\\u6790"), "fields": [("competitors", U("\\u7ade\\u54c1\\u540d\\u5355")), ("coverage_comparison", U("\\u7ade\\u54c1\\u5728 AI \\u5e73\\u53f0 / \\u641c\\u7d22\\u7aef\\u8986\\u76d6\\u60c5\\u51b5\\u5bf9\\u6bd4")), ("competitor_advantages", U("\\u7ade\\u54c1\\u4f18\\u52bf\\u70b9\\uff08\\u53ef\\u501f\\u9274\\uff09")), ("differentiation_breakthroughs", U("\\u6211\\u65b9\\u5dee\\u5f02\\u5316\\u7a81\\u7834\\u70b9"))]},
+    {"key": "faq_opportunities", "title": U("\\u516b\\u3001\\u884c\\u4e1a & \\u7528\\u6237\\u9ad8\\u9891\\u95ee\\u9898\\u6c47\\u603b"), "fields": [("industry_common_faq", U("\\u884c\\u4e1a\\u901a\\u7528\\u9ad8\\u9891\\u95ee\\u7b54")), ("brand_specific_questions", U("\\u54c1\\u724c\\u4e13\\u5c5e\\u7528\\u6237\\u7591\\u95ee")), ("negative_sensitive_questions", U("\\u8d1f\\u9762\\u654f\\u611f\\u6f5c\\u5728\\u95ee\\u9898")), ("batch_qa_layout", U("\\u9700\\u6279\\u91cf\\u5e03\\u5c40\\u95ee\\u7b54\\u6e05\\u5355"))]},
+    {"key": "sentiment_monitoring", "title": U("\\u4e5d\\u3001\\u54c1\\u724c\\u8206\\u60c5\\u76d1\\u6d4b\\u5206\\u6790"), "fields": [("positive_sentiment", U("\\u6b63\\u9762\\u8206\\u60c5\\u5185\\u5bb9")), ("neutral_sentiment", U("\\u4e2d\\u6027\\u8206\\u60c5\\u5185\\u5bb9")), ("negative_risks", U("\\u8d1f\\u9762\\u8206\\u60c5 / \\u98ce\\u9669\\u70b9")), ("risk_level_warning", U("\\u8206\\u60c5\\u98ce\\u9669\\u7b49\\u7ea7 & \\u9884\\u8b66\\u8bf4\\u660e"))]},
+    {"key": "problem_summary", "title": U("\\u5341\\u3001GEO \\u95ee\\u9898\\u6c47\\u603b\\uff08\\u6838\\u5fc3\\u75db\\u70b9\\u6e05\\u5355\\uff09"), "fields": [("infrastructure_issues", U("\\u57fa\\u5efa\\u7c7b\\u95ee\\u9898")), ("ai_indexing_issues", U("AI \\u6536\\u5f55\\u7c7b\\u95ee\\u9898")), ("search_exposure_issues", U("\\u641c\\u7d22\\u66dd\\u5149\\u7c7b\\u95ee\\u9898")), ("trust_issues", U("\\u80cc\\u4e66\\u4fe1\\u4efb\\u7c7b\\u95ee\\u9898")), ("sentiment_risks", U("\\u8206\\u60c5\\u98ce\\u9669\\u7c7b\\u95ee\\u9898"))]},
+    {"key": "execution_plan", "title": U("\\u5341\\u4e00\\u3001GEO \\u4f18\\u5316\\u843d\\u5730\\u6267\\u884c\\u65b9\\u6848"), "fields": [("phase_1_infrastructure", U("\\u7b2c\\u4e00\\u9636\\u6bb5\\uff1a\\u57fa\\u7840\\u57fa\\u5efa\\u8865\\u5168")), ("phase_2_authority_sources", U("\\u7b2c\\u4e8c\\u9636\\u6bb5\\uff1a\\u6743\\u5a01\\u80cc\\u4e66 & \\u4fe1\\u6e90\\u642d\\u5efa")), ("phase_3_ai_content_seeding", U("\\u7b2c\\u4e09\\u9636\\u6bb5\\uff1aAI \\u641c\\u7d22\\u5185\\u5bb9\\u9884\\u57cb")), ("phase_4_multi_platform_distribution", U("\\u7b2c\\u56db\\u9636\\u6bb5\\uff1a\\u5168\\u7f51\\u591a\\u5e73\\u53f0\\u94fa\\u91cf")), ("phase_5_monitoring_iteration", U("\\u7b2c\\u4e94\\u9636\\u6bb5\\uff1a\\u5b9a\\u671f\\u76d1\\u6d4b & \\u8fed\\u4ee3\\u4f18\\u5316"))]},
+    {"key": "expected_outcomes", "title": U("\\u5341\\u4e8c\\u3001\\u9884\\u671f\\u4f18\\u5316\\u6548\\u679c\\u76ee\\u6807"), "fields": [("day_30_goal", U("30 \\u5929\\u76ee\\u6807")), ("day_60_goal", U("60 \\u5929\\u76ee\\u6807")), ("day_90_goal", U("90 \\u5929\\u76ee\\u6807"))]},
+]
+
+
+def is_blank_report_value(value: Any) -> bool:
+    if value in (None, "", [], {}):
+        return True
+    if isinstance(value, str):
+        stripped = value.strip()
+        return not stripped or stripped in {"?", "??", "???", "????", U("\\u5f85\\u6838\\u67e5"), PENDING_TEXT}
+    return False
+
+
+def build_analysis_prompt(company_name: str, test_environment: str, user_test_query: str, rewritten_queries: list[str], records: list[PromptRunRecord], citation_counts: list[dict[str, Any]]) -> str:
+    result_summaries = [
+        {
+            "query": record.query,
+            "result_excerpt": record.result[:900],
+            "sources": [item for item in record.sources.splitlines() if item.strip()][:6],
+            "source_urls": [item for item in record.source_urls.splitlines() if item.strip()][:6],
+            "source_titles": [item for item in record.source_titles.splitlines() if item.strip()][:6],
+        }
+        for record in records
+    ]
+    schema = {section["key"]: {field_key: "" for field_key, _ in section["fields"]} for section in AUDIT_SECTION_SCHEMA}
+    schema["basic_info"]["brand_name"] = company_name
+    schema["basic_info"]["diagnosis_date"] = datetime.now().strftime("%Y-%m-%d")
+    return f"""
+{U('\\u4f60\\u662f\\u4e00\\u540d GEO \\u4f18\\u5316\\u8bca\\u65ad\\u5ba1\\u8ba1\\u987e\\u95ee\\u3002\\u8bf7\\u57fa\\u4e8e\\u6d4b\\u8bd5\\u6570\\u636e\\uff0c\\u751f\\u6210\\u7ed3\\u6784\\u5316 JSON\\uff0c\\u7528\\u4e8e\\u6e32\\u67d3\\u300aGEO \\u4f18\\u5316\\u8bca\\u65ad\\u5ba1\\u8ba1\\u62a5\\u544a\\u300b\\u3002')}
+
+{U('\\u76ee\\u6807\\u54c1\\u724c / \\u4f01\\u4e1a')}?{company_name}
+{U('\\u6d4b\\u8bd5\\u73af\\u5883')}?{test_environment}
+{U('\\u539f\\u59cb\\u6d4b\\u8bd5\\u95ee\\u9898')}?{user_test_query}
+{U('\\u6539\\u5199\\u6d4b\\u8bd5\\u95ee\\u9898')}?{json.dumps(rewritten_queries, ensure_ascii=False)}
+AI {U('\\u5e73\\u53f0\\u6d4b\\u8bd5\\u7ed3\\u679c\\u6458\\u8981')}?{json.dumps(result_summaries, ensure_ascii=False)}
+{U('\\u4fe1\\u6e90\\u5f15\\u7528\\u7edf\\u8ba1')}?{json.dumps(citation_counts, ensure_ascii=False)}
+
+{U('\\u8f93\\u51fa\\u8981\\u6c42')}?
+1. {U('\\u53ea\\u8f93\\u51fa JSON \\u5bf9\\u8c61\\uff0c\\u4e0d\\u8981 Markdown\\uff0c\\u4e0d\\u8981\\u89e3\\u91ca\\u3002')}
+2. {U('\\u5fc5\\u987b\\u5305\\u542b report_title\\u3001sections\\u3001analysis_conclusion \\u4e09\\u4e2a\\u9876\\u5c42\\u5b57\\u6bb5\\u3002')}
+3. sections {U('\\u5fc5\\u987b\\u4e25\\u683c\\u4f7f\\u7528\\u4e0b\\u9762\\u7ed9\\u51fa\\u7684 12 \\u4e2a\\u952e\\uff0c\\u6bcf\\u4e2a\\u952e\\u4e0b\\u5fc5\\u987b\\u5305\\u542b\\u6307\\u5b9a\\u5b57\\u6bb5\\u3002')}
+4. {U('\\u6bcf\\u4e2a\\u5b57\\u6bb5\\u4f18\\u5148\\u8f93\\u51fa 2-5 \\u6761\\u77ed\\u8981\\u70b9\\uff1b\\u6ca1\\u6709\\u4f9d\\u636e\\u65f6\\u5199\\u201c\\u6682\\u65e0\\u660e\\u786e\\u7ed3\\u8bba\\u201d\\uff0c\\u4e0d\\u8981\\u8f93\\u51fa\\u95ee\\u53f7\\u3002')}
+5. {U('\\u4e0d\\u786e\\u5b9a\\u7684\\u4fe1\\u606f\\u4e0d\\u8981\\u7f16\\u9020\\u5177\\u4f53\\u8d44\\u8d28\\u3001\\u5a92\\u4f53\\u3001\\u641c\\u7d22\\u6307\\u6570\\u6216\\u7b2c\\u4e09\\u65b9\\u6570\\u636e\\u3002')}
+6. {U('\\u5a92\\u4f53\\u3001\\u94fe\\u63a5\\u3001AI \\u63d0\\u53ca\\u60c5\\u51b5\\u53ea\\u80fd\\u57fa\\u4e8e\\u6d4b\\u8bd5\\u7ed3\\u679c\\u548c\\u4fe1\\u6e90\\u5f15\\u7528\\u7edf\\u8ba1\\u5f52\\u7eb3\\u3002')}
+
+JSON {U('\\u7ed3\\u6784\\u6a21\\u677f')}?
+{json.dumps({"report_title": REPORT_TITLE, "analysis_conclusion": "", "sections": schema}, ensure_ascii=False, indent=2)}
+""".strip()
+
+
+def default_report_sections(company_name: str = "") -> dict[str, Any]:
+    sections: dict[str, Any] = {}
+    for section in AUDIT_SECTION_SCHEMA:
+        sections[section["key"]] = {field_key: "" for field_key, _ in section["fields"]}
+    sections["basic_info"].update({"brand_name": company_name, "diagnosis_date": datetime.now().strftime("%Y-%m-%d")})
+    return sections
+
+
+def normalize_report_sections(analysis: dict[str, Any], company_name: str = "") -> dict[str, Any]:
+    source_sections = analysis.get("sections") if isinstance(analysis.get("sections"), dict) else {}
+    sections = default_report_sections(company_name)
+    for section in AUDIT_SECTION_SCHEMA:
+        source = source_sections.get(section["key"], {}) if isinstance(source_sections, dict) else {}
+        if not isinstance(source, dict):
+            source = {}
+        for field_key, _ in section["fields"]:
+            value = source.get(field_key)
+            if not is_blank_report_value(value):
+                sections[section["key"]][field_key] = value
+    if company_name and is_blank_report_value(sections["basic_info"].get("brand_name")):
+        sections["basic_info"]["brand_name"] = company_name
+    return sections
+
+
+def parse_analysis(text: str) -> dict[str, Any]:
+    try:
+        payload = parse_json_payload(text)
+        if isinstance(payload, dict):
+            payload["report_title"] = REPORT_TITLE
+            payload["analysis_conclusion"] = "" if is_blank_report_value(payload.get("analysis_conclusion")) else str(payload.get("analysis_conclusion"))
+            payload["sections"] = normalize_report_sections(payload)
+            return payload
+    except ValueError:
+        pass
+    return {"report_title": REPORT_TITLE, "analysis_conclusion": text.strip(), "sections": default_report_sections()}
+
+
+def html_text(value: Any) -> str:
+    if is_blank_report_value(value):
+        return '<span class="empty-value">' + PENDING_TEXT + '</span>'
+    if isinstance(value, list):
+        items = [item for item in value if not is_blank_report_value(item)][:5]
+        if not items:
+            return '<span class="empty-value">' + PENDING_TEXT + '</span>'
+        return '<ul class="bullet-list">' + ''.join(f'<li>{html_text(item)}</li>' for item in items) + '</ul>'
+    if isinstance(value, dict):
+        rows = []
+        for key, item in list(value.items())[:6]:
+            if is_blank_report_value(item):
+                continue
+            rows.append(f'<div class="kv-row"><span>{escape(str(key))}</span><strong>{html_text(item)}</strong></div>')
+        return '<div class="kv-list">' + ''.join(rows) + '</div>' if rows else '<span class="empty-value">' + PENDING_TEXT + '</span>'
+    return escape(str(value)).replace("\\n", "<br>")
+
+
+def render_report_field(label: str, value: Any, index: int) -> str:
+    compact_class = " is-empty" if is_blank_report_value(value) else ""
+    return f'<article class="field-card{compact_class}"><h2><span>{index:02d}</span>{escape(label)}</h2><div class="field-value">{html_text(value)}</div></article>'
+
+
+def render_report_page(section: dict[str, Any], section_data: dict[str, Any], page_number: int, total_pages: int) -> str:
+    fields_html = ''.join(render_report_field(label, section_data.get(field_key), index) for index, (field_key, label) in enumerate(section["fields"], start=1))
+    section_prefix, _, section_title = section["title"].partition(U("\\u3001"))
+    section_title = section_title or section["title"]
+    return f"""
+    <section class="report-page">
+      <div class="top-band"></div>
+      <header class="page-header">
+        <div class="title-block">
+          <p class="eyebrow">GEO AUDIT REPORT</p>
+          <div class="title-row"><span class="section-index">{escape(section_prefix)}</span><h1>{escape(section_title)}</h1></div>
+        </div>
+        <div class="page-number">{page_number:02d}<small>/{total_pages:02d}</small></div>
+      </header>
+      <div class="field-grid">{fields_html}</div>
+      <footer class="page-footer"><span>{REPORT_TITLE}</span><span>AI {U('\\u641c\\u7d22\\u53ef\\u89c1\\u5ea6')} ? {U('\\u4fe1\\u6e90')} ? {U('\\u7ade\\u54c1')} ? {U('\\u8206\\u60c5')} ? {U('\\u6267\\u884c\\u65b9\\u6848')}</span></footer>
+    </section>
+"""
+
+
+def build_html_report(payload: dict[str, Any]) -> str:
+    analysis = payload.get("analysis", {}) if isinstance(payload.get("analysis"), dict) else {}
+    company_name = str(payload.get("company_name") or "")
+    sections = normalize_report_sections(analysis, company_name)
+    pages = ''.join(render_report_page(section, sections.get(section["key"], {}), index, len(AUDIT_SECTION_SCHEMA)) for index, section in enumerate(AUDIT_SECTION_SCHEMA, start=1))
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{REPORT_TITLE}</title>
+  <style>
+    @page {{ size: A4; margin: 0; }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin:0; background:#d9e2ef; color:#162033; font-family:"Microsoft YaHei","PingFang SC",Arial,sans-serif; }}
+    .report-page {{ position:relative; width:210mm; height:297mm; margin:0 auto; padding:15mm 16mm 14mm; background:linear-gradient(180deg,#ffffff 0%,#f8fbff 100%); break-after:page; page-break-after:always; overflow:hidden; }}
+    .report-page:last-child {{ break-after:auto; page-break-after:auto; }}
+    .top-band {{ position:absolute; left:0; top:0; right:0; height:8mm; background:linear-gradient(90deg,#0f3b82,#1d75d8 52%,#2dd4bf); }}
+    .page-header {{ position:relative; display:flex; justify-content:space-between; gap:12mm; padding-top:7mm; padding-bottom:6mm; border-bottom:1px solid #d6e2f2; }}
+    .eyebrow {{ margin:0 0 3mm; color:#1d4ed8; font-size:9px; letter-spacing:2.2px; font-weight:800; }}
+    .title-row {{ display:flex; align-items:flex-start; gap:4mm; }}
+    .section-index {{ display:inline-flex; align-items:center; justify-content:center; min-width:17mm; height:12mm; padding:0 3mm; border-radius:999px; color:#fff; background:#1d4ed8; font-size:15px; font-weight:800; }}
+    h1 {{ margin:0; color:#0f172a; font-size:24px; line-height:1.25; letter-spacing:-.2px; }}
+    .page-number {{ color:#1d4ed8; font-size:24px; line-height:1; font-weight:900; }}
+    .page-number small {{ color:#94a3b8; font-size:12px; font-weight:700; }}
+    .field-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:4mm; margin-top:6mm; }}
+    .field-card {{ min-height:23mm; padding:4mm; border:1px solid #d8e5f5; border-radius:14px; background:rgba(255,255,255,.88); box-shadow:0 6px 18px rgba(30,64,175,.06); overflow:hidden; }}
+    .field-card.is-empty {{ min-height:16mm; background:#f4f7fb; border-style:dashed; }}
+    .field-card:nth-child(1):last-child, .field-card:nth-last-child(1):nth-child(odd) {{ grid-column:span 2; }}
+    .field-card h2 {{ display:flex; align-items:center; gap:2mm; margin:0 0 2.5mm; color:#0f3b82; font-size:13.5px; line-height:1.35; font-weight:800; }}
+    .field-card h2 span {{ flex:0 0 auto; color:#38bdf8; font-size:11px; font-family:Arial,sans-serif; }}
+    .field-value {{ color:#243044; font-size:12.1px; line-height:1.58; }}
+    .bullet-list {{ margin:0; padding-left:1.15em; }}
+    .bullet-list li {{ margin:0 0 1.2mm; }}
+    .kv-list {{ display:grid; gap:1.8mm; }}
+    .kv-row {{ display:grid; grid-template-columns:27% 1fr; gap:2mm; padding:1.5mm 0; border-bottom:1px dashed #dbe5f3; }}
+    .kv-row span {{ color:#64748b; font-size:11px; }}
+    .kv-row strong {{ color:#243044; font-weight:500; }}
+    .empty-value {{ color:#94a3b8; font-style:normal; }}
+    .page-footer {{ position:absolute; left:16mm; right:16mm; bottom:7mm; display:flex; justify-content:space-between; gap:6mm; padding-top:2.8mm; border-top:1px solid #d6e2f2; color:#64748b; font-size:10px; }}
+    @media screen {{ .report-page {{ margin:14px auto; box-shadow:0 18px 48px rgba(15,23,42,.2); }} }}
+    @media print {{ body {{ background:#fff; }} .report-page {{ margin:0; box-shadow:none; }} }}
+  </style>
+</head>
+<body>
+  <div style="display:none">{U('\\u54c1\\u724c')}?{escape(company_name)}?{U('\\u751f\\u6210\\u65f6\\u95f4')}?{escape(generated_at)}</div>
+  {pages}
+</body>
+</html>"""
+
+
+def write_html_output(output_path: Path, payload: dict[str, Any]) -> Path:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(build_html_report(payload), encoding="utf-8")
+    return output_path
+
+
+def write_pdf_output(html_path: Path, pdf_path: Path) -> Path:
+    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+    with sync_playwright() as playwright:
+        try:
+            browser = playwright.chromium.launch(channel="chrome", headless=True)
+        except PlaywrightError:
+            browser = playwright.chromium.launch(headless=True)
+        try:
+            page = browser.new_page(viewport={"width": 1240, "height": 1754})
+            page.goto(html_path.resolve().as_uri(), wait_until="networkidle")
+            page.pdf(path=str(pdf_path), format="A4", print_background=True, prefer_css_page_size=True, margin={"top": "0", "right": "0", "bottom": "0", "left": "0"})
+        finally:
+            browser.close()
+    return pdf_path
 
 
 @app.get("/health")

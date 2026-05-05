@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import random
 import re
 import sys
 import time
@@ -37,6 +38,9 @@ class BrowserConfig:
     headless: bool
     startup_wait_ms: int
     action_timeout_ms: int
+    connect_over_cdp: bool
+    cdp_endpoint: str
+    new_page_per_session: bool
 
 
 @dataclass
@@ -56,8 +60,18 @@ class ChatConfig:
     send_hotkey: str
     clear_input_hotkey: str
     new_chat_each_prompt: bool
+    new_chat_on_session_start: bool
     manual_login: bool
     manual_popup_confirmation: bool
+    manual_verification_timeout_seconds: int
+
+
+@dataclass
+class RateLimitConfig:
+    min_delay_seconds: float
+    max_delay_seconds: float
+    pause_every_n_prompts: int
+    pause_seconds: float
 
 
 @dataclass
@@ -65,6 +79,7 @@ class AppConfig:
     excel: ExcelConfig
     browser: BrowserConfig
     chat: ChatConfig
+    rate_limit: RateLimitConfig
 
 
 @dataclass
@@ -122,6 +137,7 @@ def load_config(config_path: Path) -> AppConfig:
     excel_raw = raw["excel"]
     browser_raw = raw["browser"]
     chat_raw = raw.get("chat") or raw.get("doubao")
+    rate_limit_raw = raw.get("rate_limit", {})
     if not chat_raw:
         raise ValueError("Config must contain a 'chat' section. Legacy 'doubao' is also supported.")
 
@@ -147,6 +163,9 @@ def load_config(config_path: Path) -> AppConfig:
         headless=bool(browser_raw.get("headless", False)),
         startup_wait_ms=int(browser_raw.get("startup_wait_ms", 2000)),
         action_timeout_ms=int(browser_raw.get("action_timeout_ms", 15000)),
+        connect_over_cdp=bool(browser_raw.get("connect_over_cdp", False)),
+        cdp_endpoint=browser_raw.get("cdp_endpoint", "http://127.0.0.1:9222"),
+        new_page_per_session=bool(browser_raw.get("new_page_per_session", False)),
     )
     chat = ChatConfig(
         platform_name=chat_raw.get("platform_name", "web-chat"),
@@ -166,10 +185,20 @@ def load_config(config_path: Path) -> AppConfig:
         send_hotkey=chat_raw.get("send_hotkey", "Enter"),
         clear_input_hotkey=chat_raw.get("clear_input_hotkey", "Control+A"),
         new_chat_each_prompt=bool(chat_raw.get("new_chat_each_prompt", False)),
+        new_chat_on_session_start=bool(chat_raw.get("new_chat_on_session_start", True)),
         manual_login=bool(chat_raw.get("manual_login", True)),
         manual_popup_confirmation=bool(chat_raw.get("manual_popup_confirmation", True)),
+        manual_verification_timeout_seconds=int(chat_raw.get("manual_verification_timeout_seconds", 0)),
     )
-    return AppConfig(excel=excel, browser=browser, chat=chat)
+    rate_limit = RateLimitConfig(
+        min_delay_seconds=float(rate_limit_raw.get("min_delay_seconds", 0)),
+        max_delay_seconds=float(rate_limit_raw.get("max_delay_seconds", 0)),
+        pause_every_n_prompts=int(rate_limit_raw.get("pause_every_n_prompts", 0)),
+        pause_seconds=float(rate_limit_raw.get("pause_seconds", 0)),
+    )
+    if rate_limit.max_delay_seconds < rate_limit.min_delay_seconds:
+        rate_limit.max_delay_seconds = rate_limit.min_delay_seconds
+    return AppConfig(excel=excel, browser=browser, chat=chat, rate_limit=rate_limit)
 
 
 _POPUP_CAPTURED_STATE: dict[int, bool] = {}
@@ -238,6 +267,31 @@ def ensure_chat_ready(page, config: AppConfig) -> tuple[str, object]:
         f"Could not find a visible input box for {config.chat.platform_name}. "
         "Update chat.input_selectors in config.json."
     )
+
+
+def ensure_chat_ready_or_wait_for_manual_verification(page, config: AppConfig) -> tuple[str, object]:
+    try:
+        return ensure_chat_ready(page, config)
+    except RuntimeError:
+        if not config.chat.manual_popup_confirmation:
+            raise
+
+        print(
+            f"Could not find a visible input box for {config.chat.platform_name}. "
+            "If a verification or login check is shown, complete it in Chrome. "
+            "The script will continue automatically."
+        )
+        timeout_seconds = config.chat.manual_verification_timeout_seconds
+        deadline = time.time() + timeout_seconds if timeout_seconds > 0 else None
+        while deadline is None or time.time() < deadline:
+            resolved = resolve_first_locator(page, config.chat.input_selectors, require_visible=True)
+            if resolved:
+                page.wait_for_timeout(1000)
+                return resolved
+            time.sleep(config.chat.poll_interval_seconds)
+        raise TimeoutError(
+            f"Timed out waiting for manual verification in {config.chat.platform_name}."
+        )
 
 
 def click_if_present(page, selectors: list[str], action_timeout_ms: int) -> bool:
@@ -359,8 +413,9 @@ def handle_popup_if_present(page, config: AppConfig) -> bool:
             f"Detected a popup in {config.chat.platform_name}. "
             "Complete the verification in the browser. The script will continue automatically."
         )
-        deadline = time.time() + max(60, config.chat.response_timeout_seconds)
-        while time.time() < deadline:
+        timeout_seconds = config.chat.manual_verification_timeout_seconds
+        deadline = time.time() + timeout_seconds if timeout_seconds > 0 else None
+        while deadline is None or time.time() < deadline:
             if not detect_popup(page, config.chat.popup_selectors):
                 _POPUP_CAPTURED_STATE[page_key] = False
                 page.wait_for_timeout(1000)
@@ -1263,7 +1318,7 @@ def send_prompt(page, config: AppConfig, prompt: str, include_sources: bool = Tr
         time.sleep(1)
 
     handle_popup_if_present(page, config)
-    _, input_locator = ensure_chat_ready(page, config)
+    _, input_locator = ensure_chat_ready_or_wait_for_manual_verification(page, config)
     previous_count = get_response_count(page, config.chat.response_selectors)
     previous_text = get_last_response_data(
         page,
@@ -1280,21 +1335,56 @@ def send_prompt(page, config: AppConfig, prompt: str, include_sources: bool = Tr
     return wait_for_response(page, config, previous_count, previous_text, prompt, include_sources=include_sources)
 
 
+def pick_existing_or_new_page(context, start_url: str, force_new_page: bool = False):
+    if force_new_page:
+        return context.new_page()
+    for page in context.pages:
+        try:
+            if "doubao.com" in page.url or page.url == "about:blank":
+                return page
+        except PlaywrightError:
+            continue
+    return context.pages[0] if context.pages else context.new_page()
+
+
+def wait_before_prompt(config: AppConfig, prompt_index: int) -> None:
+    if prompt_index > 1 and config.rate_limit.min_delay_seconds > 0:
+        delay = random.uniform(config.rate_limit.min_delay_seconds, config.rate_limit.max_delay_seconds)
+        print(f"Waiting {delay:.1f}s before next prompt...")
+        time.sleep(delay)
+
+    pause_every = config.rate_limit.pause_every_n_prompts
+    if prompt_index > 1 and pause_every > 0 and (prompt_index - 1) % pause_every == 0:
+        pause_seconds = config.rate_limit.pause_seconds
+        if pause_seconds > 0:
+            print(f"Cooling down for {pause_seconds:.1f}s after {prompt_index - 1} prompts...")
+            time.sleep(pause_seconds)
+
+
 @contextmanager
 def open_chat_page(config: AppConfig, interactive_login: bool = True):
-    config.browser.user_data_dir.mkdir(parents=True, exist_ok=True)
+    if not config.browser.connect_over_cdp:
+        config.browser.user_data_dir.mkdir(parents=True, exist_ok=True)
 
     with sync_playwright() as playwright:
-        launch_kwargs = {
-            "user_data_dir": str(config.browser.user_data_dir),
-            "headless": config.browser.headless,
-        }
-        if config.browser.channel:
-            launch_kwargs["channel"] = config.browser.channel
+        if config.browser.connect_over_cdp:
+            browser = playwright.chromium.connect_over_cdp(config.browser.cdp_endpoint)
+            context = browser.contexts[0] if browser.contexts else browser.new_context()
+        else:
+            launch_kwargs = {
+                "user_data_dir": str(config.browser.user_data_dir),
+                "headless": config.browser.headless,
+            }
+            if config.browser.channel:
+                launch_kwargs["channel"] = config.browser.channel
+            context = playwright.chromium.launch_persistent_context(**launch_kwargs)
 
-        context = playwright.chromium.launch_persistent_context(**launch_kwargs)
         context.set_default_timeout(config.browser.action_timeout_ms)
-        page = context.pages[0] if context.pages else context.new_page()
+        page = pick_existing_or_new_page(
+            context,
+            config.browser.start_url,
+            force_new_page=config.browser.new_page_per_session,
+        )
         page.goto(config.browser.start_url, wait_until="domcontentloaded")
         page.wait_for_timeout(config.browser.startup_wait_ms)
 
@@ -1316,10 +1406,14 @@ def open_chat_page(config: AppConfig, interactive_login: bool = True):
                 ensure_chat_ready(page, config)
 
         handle_popup_if_present(page, config)
+        if config.chat.new_chat_on_session_start:
+            click_if_present(page, config.chat.new_chat_selectors, config.browser.action_timeout_ms)
+            page.wait_for_timeout(1000)
         try:
             yield context, page
         finally:
-            pass
+            if config.browser.new_page_per_session:
+                page.close()
 
 
 def run_prompt_batch(
@@ -1417,6 +1511,7 @@ def main() -> int:
 
     with open_chat_page(config, interactive_login=True) as (_, page):
         for index, row_idx in enumerate(rows, start=1):
+            wait_before_prompt(config, index)
             prompt = str(sheet.cell(row=row_idx, column=prompt_col).value).strip()
             print(f"[{index}/{len(rows)}] Processing row {row_idx}")
             try:
